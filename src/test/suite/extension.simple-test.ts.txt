@@ -1,0 +1,52 @@
+import * as assert from 'assert';
+import * as vscode from 'vscode';
+import * as path from 'path';
+
+/**
+ * Integration test: activates the ASE extension and verifies the LSP
+ * client starts and answers a hover request.
+ */
+suite('ASE Extension Integration', () => {
+    test('extension activates and LSP hover works', async function () {
+        this.timeout(120000);
+
+        // Ensure extension is activated.
+        const ext = vscode.extensions.getExtension('ase-dev.android-studio-experience');
+        assert.ok(ext, 'extension should be discoverable');
+        await ext!.activate();
+        assert.ok(ext!.isActive, 'extension should activate');
+
+        // Open a Kotlin document in the fixture workspace.
+        const fixturePath = path.join(
+            vscode.workspace.workspaceFolders![0]!.uri.fsPath,
+            'Main.kt'
+        );
+        const doc = await vscode.workspace.openTextDocument(fixturePath);
+        const editor = await vscode.window.showTextDocument(doc);
+
+        // Wait for the language client to attach and settle.
+        await new Promise((r) => setTimeout(r, 5000));
+
+        // Hover over "greet" (line 5, col 4) — definition line.
+        const hover = await vscode.commands.executeCommand<vscode.Hover[]>(
+            'vscode.executeHoverProvider',
+            doc.uri,
+            new vscode.Position(5, 4)
+        );
+        assert.ok(hover && hover.length > 0, 'hover provider should return results');
+        const contents = hover![0].contents.map((c) => (typeof c === 'string' ? c : c.value)).join('\n');
+        assert.ok(contents.includes('greet'), `hover should mention greet, got: ${contents}`);
+
+        // Go-to-definition from the call site in Greeter.sayHello (line 10, col ~31).
+        const defs = await vscode.commands.executeCommand<vscode.Location[]>(
+            'vscode.executeDefinitionProvider',
+            doc.uri,
+            new vscode.Position(10, 31)
+        );
+        assert.ok(defs && defs.length > 0, 'definition provider should resolve greet');
+        assert.strictEqual(defs![0].range.start.line, 5, 'definition should point to greet declaration');
+
+        // Cleanup.
+        await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+    });
+});

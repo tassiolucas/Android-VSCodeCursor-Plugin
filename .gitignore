@@ -1,0 +1,25 @@
+# Node
+node_modules/
+
+# TypeScript build output
+out/
+
+# VS Code test artifacts
+.vscode-test/
+
+# Gradle / Kotlin build
+server/build/
+server/.gradle/
+
+# VS Code extension packaging
+*.vsix
+
+# ASE runtime index (created in workspace root at runtime)
+.ase-index/
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,125 @@
+{
+  "name": "android-studio-experience",
+  "displayName": "Android Studio Experience",
+  "description": "Custom Android/Kotlin IDE experience for Cursor/VSCode: own LSP engine, Compose & XML previews, run/debug pipeline, IntelliJ-like Git workflow.",
+  "version": "0.0.1",
+  "publisher": "ase-dev",
+  "license": "Apache-2.0",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Debuggers",
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onLanguage:kotlin",
+    "onLanguage:java",
+    "onLanguage:xml",
+    "workspaceContains:**/build.gradle.kts",
+    "workspaceContains:**/build.gradle",
+    "workspaceContains:settings.gradle",
+    "workspaceContains:settings.gradle.kts"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "kotlin",
+        "aliases": [
+          "Kotlin",
+          "kotlin"
+        ],
+        "extensions": [
+          ".kt",
+          ".kts"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "configuration": {
+      "title": "Android Studio Experience",
+      "properties": {
+        "ase.renderer.timeoutSeconds": {
+          "type": "number",
+          "default": 300,
+          "description": "How long the preview renderer daemon stays alive after the last request before shutting down."
+        },
+        "ase.server.javaPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the Java executable used to launch the LSP server. Empty = use JAVA_HOME / PATH."
+        },
+        "ase.indexing.generatedSources": {
+          "type": "boolean",
+          "default": true,
+          "description": "Index KSP/KAPT generated sources found under build/generated/."
+        },
+        "ase.sdk.minApi": {
+          "type": "number",
+          "default": 21,
+          "description": "Minimum supported Android API level (baseline used for preview rendering)."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "ase.indexProject",
+        "title": "ASE: Index Project",
+        "category": "Android Studio Experience"
+      },
+      {
+        "command": "ase.renderComposePreview",
+        "title": "ASE: Render Compose Preview",
+        "category": "Android Studio Experience"
+      },
+      {
+        "command": "ase.renderLayoutPreview",
+        "title": "ASE: Render Layout Preview",
+        "category": "Android Studio Experience"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "ase.indexProject",
+        "key": "ctrl+alt+g",
+        "mac": "cmd+alt+g"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "ase.renderComposePreview",
+          "when": "editorLangId == kotlin",
+          "group": "navigation@1"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "build:server": "gradle -p server installDist",
+    "build:all": "npm run compile && npm run build:server",
+    "test:lsp": "node scripts/test-lsp.js",
+    "test:integration": "node out/test/runTest.js",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/glob": "^8.1.0",
+    "@types/mocha": "^10.0.10",
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/test-electron": "^3.1.0",
+    "@vscode/vsce": "^2.30.0",
+    "glob": "^13.0.6",
+    "mocha": "^12.0.1",
+    "typescript": "^5.4.0"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  }
+}
