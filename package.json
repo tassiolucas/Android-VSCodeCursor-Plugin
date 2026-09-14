@@ -39,6 +39,11 @@
         "configuration": "./language-configuration.json"
       }
     ],
+    "configurationDefaults": {
+      "[kotlin]": {
+        "editor.semanticHighlighting.enabled": true
+      }
+    },
     "configuration": {
       "title": "Android Studio Experience",
       "properties": {
@@ -79,6 +84,11 @@
         "command": "ase.renderLayoutPreview",
         "title": "ASE: Render Layout Preview",
         "category": "Android Studio Experience"
+      },
+      {
+        "command": "ase.showReferences",
+        "title": "ASE: Show References",
+        "category": "Android Studio Experience"
       }
     ],
     "keybindings": [
@@ -86,6 +96,72 @@
         "command": "ase.indexProject",
         "key": "ctrl+alt+g",
         "mac": "cmd+alt+g"
+      },
+      {
+        "command": "editor.action.triggerParameterHints",
+        "key": "ctrl+p",
+        "mac": "cmd+p",
+        "when": "editorTextFocus && (editorLangId == kotlin || editorLangId == java)"
+      },
+      {
+        "command": "editor.action.revealDefinition",
+        "key": "ctrl+b",
+        "mac": "cmd+b",
+        "when": "editorTextFocus && (editorLangId == kotlin || editorLangId == java)"
+      },
+      {
+        "command": "editor.action.goToImplementation",
+        "key": "ctrl+alt+b",
+        "mac": "cmd+alt+b",
+        "when": "editorTextFocus && (editorLangId == kotlin || editorLangId == java)"
+      },
+      {
+        "command": "editor.action.goToTypeDefinition",
+        "key": "ctrl+shift+b",
+        "mac": "cmd+shift+b",
+        "when": "editorTextFocus && (editorLangId == kotlin || editorLangId == java)"
+      },
+      {
+        "command": "editor.action.referenceSearch.trigger",
+        "key": "alt+f7",
+        "mac": "alt+f7",
+        "when": "editorTextFocus && (editorLangId == kotlin || editorLangId == java)"
+      },
+      {
+        "command": "workbench.action.gotoSymbol",
+        "key": "ctrl+f12",
+        "mac": "cmd+f12",
+        "when": "editorTextFocus && (editorLangId == kotlin || editorLangId == java)"
+      },
+      {
+        "command": "editor.action.showHover",
+        "key": "ctrl+q",
+        "mac": "ctrl+j",
+        "when": "editorTextFocus && (editorLangId == kotlin || editorLangId == java)"
+      },
+      {
+        "command": "editor.action.showTypeHierarchy",
+        "key": "ctrl+h",
+        "mac": "ctrl+h",
+        "when": "editorTextFocus && (editorLangId == kotlin || editorLangId == java)"
+      },
+      {
+        "command": "editor.action.showCallHierarchy",
+        "key": "ctrl+alt+h",
+        "mac": "ctrl+alt+h",
+        "when": "editorTextFocus && (editorLangId == kotlin || editorLangId == java)"
+      },
+      {
+        "command": "editor.action.rename",
+        "key": "shift+f6",
+        "mac": "shift+f6",
+        "when": "editorTextFocus && (editorLangId == kotlin || editorLangId == java)"
+      },
+      {
+        "command": "editor.action.smartSelect.expand",
+        "key": "ctrl+w",
+        "mac": "alt+up",
+        "when": "editorTextFocus && (editorLangId == kotlin || editorLangId == java)"
       }
     ],
     "menus": {
@@ -105,6 +181,8 @@
     "build:server": "gradle -p server installDist",
     "build:all": "npm run compile && npm run build:server",
     "test:lsp": "node scripts/test-lsp.js",
+    "test:libraries": "node scripts/test-libraries.js",
+    "test:navigation": "node scripts/verify-navigation.js",
     "test:integration": "node out/test/runTest.js",
     "package": "vsce package"
   },

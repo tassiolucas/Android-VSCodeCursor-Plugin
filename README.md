@@ -12,23 +12,35 @@ Extensão para **VS Code / Cursor** que replica a experiência de desenvolviment
 |------|-----------|--------|
 | **Fase 1** | Motor LSP próprio (Kotlin + LSP4J) + client TypeScript | ✅ Completa |
 | **Fase 2** | Indexação cross-module com RocksDB + navegação | ✅ Completa |
-| **Fase 3** | Libs externas (`.jar`/`.class`), semantic highlighting, find usages real, preview renderer | 🔲 Próxima |
+| **Fase 3** | Libs externas (`.jar`/`.class`) + decompilação Vineflower | ✅ Completa |
+| **Fase 3.5** | Paridade de navegação/leitura com Android Studio (signature help, hierarquias, recursos XML, Java, rename, keymap AS) | ✅ Completa |
+| **Fase 4** | Preview renderer Compose/XML | 🔲 Planejada |
 
 ### O que funciona hoje
 
-- ✅ Servidor LSP `stdio` (Kotlin/JVM 21, LSP4J 0.24.0)
-- ✅ **Hover** com assinatura e doc (in-file)
-- ✅ **Go-to-definition** in-file **e cross-module** (ex.: `LoginScreen` no `composeApp` → abre `LoginScreen.kt` no módulo `auth`)
-- ✅ **Document symbols** (estrutura do arquivo)
-- ✅ **Workspace symbols** (`Ctrl+T`) usando o índice RocksDB — ~44 símbolos de 7 módulos no projeto de teste
-- ✅ Indexação automática em background na abertura do workspace
-- ✅ Indexação incremental em `didOpen` / `didSave`
+- ✅ Servidor LSP `stdio` (Kotlin/JVM 21, LSP4J 0.24.0) — **15 capabilities**
+- ✅ **Signature Help** (`Ctrl+P`, estilo Android Studio *Parameter Info*) — call-site parser próprio, parâmetro ativo, overloads, fontes: in-file → índice → libs (descritor JVM traduzido para assinatura legível)
+- ✅ **Hover** com assinatura + KDoc — in-file **e cross-file** (índice v2 carrega o contrato completo do símbolo)
+- ✅ **Go-to-definition** in-file, cross-module, libs externas (decompilação Vineflower em `ase-lib:`) **e recursos Android** (`R.string.x` → `strings.xml`, com todas as configurações `values*`)
+- ✅ **Go-to-implementation** (`Ctrl+Alt+B`) e **type hierarchy** (`Ctrl+H`) via índice de supertypes
+- ✅ **Go to Type Declaration** (`Ctrl+Shift+B`) via tipo declarado
+- ✅ **Call hierarchy** (`Ctrl+Alt+H`) — incoming/outgoing estruturais
+- ✅ **Rename** (`Shift+F6`) com `prepareRename` — cross-file via índice de referências
+- ✅ **Document highlight** — ocorrências do símbolo no arquivo (lexer-aware)
+- ✅ **Document symbols hierárquicos** (`Ctrl+F12` File Structure, outline + breadcrumbs) — classes → membros, propriedades de construtor, enum entries, typealias, construtores secundários
+- ✅ **Workspace symbols** (`Ctrl+T`) com **camelCase** (`"Lh"` → `LegacyHelper`)
+- ✅ **Semantic highlighting** — lexer próprio + resolução de tipos (in-file → índice → libs → heurística)
+- ✅ **Find references** (`Alt+F7`) — lexer-aware (sem hits em comentários/strings) + filtro de ambiguidade por pacote/import
+- ✅ **CodeLens "N usages"** sobre declarações + **Inlay hints** de nome de parâmetro (estilo AS)
+- ✅ **Arquivos Java indexados** (analyzer estrutural Java próprio) — projetos mistos Kotlin+Java
+- ✅ **Fontes geradas KSP/KAPT** indexadas (setting `ase.indexing.generatedSources`, default true)
+- ✅ **Índice persistente** RocksDB (schema v2 com migração automática); incremental em `didOpen`/`didSave`/file-watcher
+- ✅ **Keymap Android Studio** para editor Kotlin/Java: `Ctrl+P`, `Ctrl+B`, `Ctrl+Alt+B`, `Ctrl+Shift+B`, `Alt+F7`, `Ctrl+F12`, `Ctrl+Q`, `Ctrl+H`, `Ctrl+Alt+H`, `Shift+F6`, `Ctrl+W`
 - ✅ Indicador de status na barra inferior (flame `ASE LSP`)
-- ✅ Cross-platform: Windows (`cmd.exe /c`), Linux/macOS (script shell direto)
 
-### Limitação atual (Fase 2)
+### Limitação atual
 
-O scanner indexa **apenas o código-fonte local do projeto** (arquivos `.kt`). Símbolos de dependências externas (Compose, stdlib, libs Maven/`.class`) **ainda não** são indexados — é exatamente o alvo da Fase 3 (paridade com Android Studio).
+O analyzer é **estrutural** (regex/linhas com máscara de comentários/strings), não semântico. Isso significa: sem resolução precisa de sobrecargas por assinatura, sem receiver-type (`flow.map` vs `list.map`), sem type inference. As mitigações pragmáticas implementadas: definition **multi-candidato** (o peek do VS Code lista todas as opções, como o AS faz quando ambíguo), filtro de ambiguidade por pacote/import no find usages, e supertypes nomeados para hierarquias. A precisão total exige um motor semântico sobre `kotlin-compiler` — roadmap de fase futura.
 
 ---
 
@@ -41,43 +53,40 @@ O scanner indexa **apenas o código-fonte local do projeto** (arquivos `.kt`). S
 │    • vscode-languageclient spawna o servidor via stdio                      │
 │    • Windows: cmd.exe /c ase-lsp-server.bat                                 │
 │    • Linux/macOS: ase-lsp-server (script shell)                             │
-│    • Status bar + commands (ase.indexProject, ase.renderComposePreview...)  │
+│    • Status bar + commands (ase.indexProject, ase.showReferences...)        │
+│    • TextDocumentContentProvider para ase-lib: (código decompilado)         │
+│    • initializationOptions.generatedSources (setting → servidor)            │
 └──────────────────────────────────┬──────────────────────────────────────────┘
                                    │ LSP (JSON-RPC over stdio)
 ┌──────────────────────────────────▼──────────────────────────────────────────┐
 │  server/ (Kotlin + LSP4J 0.24.0)  — "ase-lsp-server"                        │
 │                                                                             │
-│  Main.kt ──► AndroidLspServer.kt ──► TextDocumentService.kt                 │
+│  Main.kt ──► AndroidLspServer.kt ──► TextDocumentService.kt (15 handlers)   │
 │                             │        WorkspaceService.kt                    │
 │                             ▼                                               │
-│  DocumentManager.kt  (documentos abertos, sync incremental)                 │
-│  KotlinAnalyzer.kt   (analyzer estrutural próprio — regex/linhas)           │
-│  IndexManager.kt ──► ProjectIndexer.kt ──► RocksDbIndex.kt                  │
-│        │                                      (RocksDB 9.7.3)               │
+│  analysis/   KotlinAnalyzer (hierárquico) + JavaAnalyzer + KotlinMask       │
+│              CallSiteParser (signature help) + SemanticTokensProvider       │
+│  documents/  DocumentManager (sync incremental)                             │
+│  index/      IndexManager ──► ProjectIndexer ──► RocksDbIndex (schema v2)   │
+│              ResourceIndexer (R.*, @layout/, ids)                           │
+│              LibraryIndexer (ASM) + ClasspathResolver + LibraryDecompiler   │
 │        └── índice em <workspace>/.ase-index/                                │
-└──────────────────────────────────────────────────────────────────────────────┘
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
-
-### Como a navegação cross-module funciona
-
-1. Na abertura do workspace, `IndexManager` indexa o projeto em background:
-   - Lê `settings.gradle(.kts)` para descobrir os módulos
-   - Varre `src/*/kotlin` de cada módulo
-   - Extrai símbolos com o analyzer estrutural
-   - Persiste em RocksDB (`<workspace>/.ase-index/`)
-2. `textDocument/definition` tenta resolver **in-file** primeiro; se não achar, extrai o identificador na posição do cursor e consulta o índice por nome — achando o símbolo **em qualquer módulo**.
-3. `workspace/symbol` consulta o índice por nome parcial.
 
 ### Layout do índice RocksDB (single column family, chaves prefixadas)
 
 | Prefixo | Conteúdo |
 |---------|----------|
-| `sym:{symbolId}` | `JSON(SymbolInfo)` |
+| `sym:{symbolId}` | `JSON(SymbolInfo)` — **v2**: signature, doc, params, returnType, superTypes, package, visibility, container |
 | `name:{name}` | ids de símbolos separados por vírgula |
-| `ref:{symbolId}` | `JSON(List<SymbolReference>)` |
-| `meta:{key}` | metadados (`indexedAt`, `symbolCount`) |
+| `ref:{symbolId}` | `JSON(List<SymbolReference>)` — referências persistidas (CodeLens) |
+| `res:{type}:{name}` | `JSON(List<ResourceEntry>)` — recursos Android (R.string.x → XML) |
+| `libsym:` / `libname:` | símbolos de bibliotecas externas (ASM) |
+| `file:{path}` | stamp mtime+size (skip de re-index) |
+| `meta:{key}` | metadados (`schemaVersion`, `indexedAt`, `symbolCount`, `classpathStamp`) |
 
-> ⚠️ O índice é **destruído e recriado** a cada abertura (`RocksDB.destroyDB`) — não há invalidação incremental persistente ainda.
+> Migração de schema: `meta:schemaVersion` ≠ 2 → índice limpo e reconstruído automaticamente.
 
 ---
 
@@ -85,29 +94,22 @@ O scanner indexa **apenas o código-fonte local do projeto** (arquivos `.kt`). S
 
 ```
 ├── src/                          # Client da extensão (TypeScript)
-│   ├── extension.ts              # Ativação, spawn do LanguageClient, status bar
-│   └── test/
-│       ├── runTest.ts            # Bootstrap @vscode/test-electron
-│       └── suite/                # Testes de integração (VS Code headless)
+│   ├── extension.ts              # Ativação, spawn do LanguageClient, status bar, ase-lib:, ase.showReferences
+│   └── test/suite/               # Testes de integração (VS Code headless)
 ├── server/                       # Servidor LSP (Kotlin)
-│   ├── build.gradle.kts          # Kotlin 2.3.0, LSP4J 0.24.0, RocksDB 9.7.3, JVM 21
 │   └── src/main/kotlin/com/androidstudioexperience/lsp/
 │       ├── Main.kt               # Entry point LSP4J (stdio)
-│       ├── AndroidLspServer.kt   # Root server, inicia IndexManager
-│       ├── TextDocumentService.kt# hover/definition/documentSymbol/completion
-│       ├── WorkspaceService.kt   # workspace/symbol, didChangeWatchedFiles
+│       ├── AndroidLspServer.kt   # Root server, capabilities, inicia IndexManager
+│       ├── TextDocumentService.kt# hover/definition/signatureHelp/rename/hierarchies/codeLens/inlayHint/...
+│       ├── WorkspaceService.kt   # workspace/symbol (+camelCase), didChangeWatchedFiles incremental
 │       ├── documents/DocumentManager.kt
-│       ├── analysis/KotlinAnalyzer.kt      # Analyzer estrutural (regex/linhas)
-│       └── index/                # SymbolInfo, RocksDbIndex, ProjectIndexer, IndexManager
-├── scripts/
-│   ├── test-lsp.js               # Smoke test stdio (initialize→hover→definition→symbols)
-│   └── test-server.js
-├── docs/                         # Documentação
-│   ├── DEVELOPMENT_HISTORY.md    # Histórico completo do desenvolvimento
-│   └── agent-handoffs/EXECUTION.md  # Handoff técnico das fases (Build→Reviewer)
-├── language-configuration.json   # Auto-closing pairs, folding para Kotlin
-├── package.json                  # Manifesto da extensão (commands, settings)
-└── tsconfig.json
+│       ├── analysis/             # KotlinAnalyzer, JavaAnalyzer, KotlinMask, CallSiteParser, SemanticTokensProvider
+│       └── index/                # SymbolInfo(v2), RocksDbIndex, ProjectIndexer, IndexManager,
+│                                 # ResourceIndexer, LibraryIndexer, ClasspathResolver, LibraryDecompiler, JvmSignatures
+├── scripts/test-lsp.js           # Smoke test stdio — 20 checks (15 capabilities + fluxos)
+├── test-workspace/               # Fixture: 2 módulos (app/core), Kotlin+Java+res/
+├── docs/                         # DEVELOPMENT_HISTORY.md + agent-handoffs/EXECUTION.md
+└── package.json                  # Manifesto (commands, settings, keymap AS)
 ```
 
 ---
@@ -178,6 +180,7 @@ npm run build:all        # npm run compile && npm run build:server
 
 ```bash
 npm run test:lsp         # node scripts/test-lsp.js
+npm run test:libraries   # libs externas (exige ASE_TEST_WORKSPACE real)
 ```
 
 Cobre: `initialize` → `didOpen` → `hover` → `definition` → `documentSymbol` → `workspace/symbol` → `shutdown`.
@@ -227,6 +230,26 @@ Já tratado em código (`process.platform === 'win32'` e `System.getProperty("os
 | `ASE: Index Project` | `Ctrl+Alt+G` / `Cmd+Alt+G` | Re-indexa o projeto (stub — indexação automática em background) |
 | `ASE: Render Compose Preview` | — (editor title) | Preview de `@Preview` Compose (Fase 4) |
 | `ASE: Render Layout Preview` | — | Preview de layout XML (Fase 4) |
+| `ASE: Show References` | — (CodeLens) | Peek de usos a partir do CodeLens "N usages" |
+
+### Keymap Android Studio (ativo em editores Kotlin/Java)
+
+| Atalho | Ação |
+|--------|------|
+| `Ctrl+P` | Parameter Info (signature help) |
+| `Ctrl+B` | Go to Declaration |
+| `Ctrl+Alt+B` | Go to Implementation(s) |
+| `Ctrl+Shift+B` | Go to Type Declaration |
+| `Alt+F7` | Find Usages |
+| `Ctrl+F12` | File Structure |
+| `Ctrl+Q` | Quick Documentation (hover) |
+| `Ctrl+H` | Type Hierarchy |
+| `Ctrl+Alt+H` | Call Hierarchy |
+| `Shift+F6` | Rename |
+| `Ctrl+W` | Extend Selection |
+| `Ctrl+T` | Workspace Symbols (nativo do VS Code) |
+
+> Todos os rebinds têm `when` restrito a `editorLangId == kotlin || java` — fora de editores Kotlin/Java, os atalhos padrão do VS Code (Quick Open em `Ctrl+P`, sidebar em `Ctrl+B`, etc.) seguem intactos.
 
 Settings disponíveis: `ase.server.javaPath`, `ase.indexing.generatedSources`, `ase.renderer.timeoutSeconds`, `ase.sdk.minApi`.
 
@@ -234,13 +257,16 @@ Settings disponíveis: `ase.server.javaPath`, `ase.indexing.generatedSources`, `
 
 ## Roadmap
 
-- **Fase 3** — Kotlin Analysis API para resolução real de tipos
-  - Indexação de dependências externas (libs Maven, stdlib, `.class`)
-  - Semantic highlighting (LSP `textDocument/semanticTokens`)
-  - Find usages / call hierarchy reais (hoje são text-based)
-  - Go-to-definition para `.class` (decompilação)
+- **Fase 3 (completa)** — Libs externas: classpath real via Gradle + ASM + decompilação Vineflower ✅
+- **Fase 3.5 (completa)** — Paridade de navegação/leitura com Android Studio:
+  - ✅ Índice v2 (contrato completo do símbolo: assinatura, doc, params, returnType, superTypes, package, visibilidade)
+  - ✅ Analyzer hierárquico (multi-linha, construtores, typealias, enum entries, companion)
+  - ✅ Signature Help (`Ctrl+P`), implementations, type definition, call/type hierarchy, rename, document highlight
+  - ✅ Recursos Android (`R.string.x` → XML), arquivos `.java`, fontes KSP/KAPT
+  - ✅ CodeLens "N usages", inlay hints de parâmetros, workspace symbol camelCase, keymap AS
 - **Fase 4** — Preview renderer Compose/XML
 - **Fase 5** — Run/debug pipeline, Git workflow estilo IntelliJ
+- **Futuro** — Motor semântico sobre `kotlin-compiler` (resolução precisa de overloads, receiver-type, inference)
 
 ---
 

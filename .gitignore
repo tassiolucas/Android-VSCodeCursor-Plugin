@@ -11,6 +11,10 @@ out/
 server/build/
 server/.gradle/
 
+# Packaged server bundle for VSIX
+server/bin/
+server/lib/
+
 # VS Code extension packaging
 *.vsix
 

@@ -24,6 +24,12 @@ fun main(args: Array<String>) {
     val clientProxy: LanguageClient = launcher.remoteProxy
     server.connect(clientProxy)
 
+    // Close the index cleanly on JVM exit (SIGTERM/exit) to reduce the chance
+    // of RocksDB corruption; a hard SIGKILL is handled by recovery on open.
+    Runtime.getRuntime().addShutdownHook(Thread {
+        try { server.dispose() } catch (_: Exception) {}
+    })
+
     // Keep the main thread alive while the reader thread listens on stdin.
     val future: java.util.concurrent.Future<Void> = launcher.startListening()
     try {

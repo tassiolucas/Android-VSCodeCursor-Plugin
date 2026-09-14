@@ -16,9 +16,12 @@ import com.androidstudioexperience.lsp.analysis.KotlinAnalyzer
  */
 class ProjectIndexer(
     private val index: RocksDbIndex,
-    private val analyzer: KotlinAnalyzer
+    private val analyzer: KotlinAnalyzer,
+    private val includeGeneratedSources: Boolean = true,
 ) {
     private val logger = LoggerFactory.getLogger(javaClass)
+    private val javaAnalyzer = com.androidstudioexperience.lsp.analysis.JavaAnalyzer()
+    private val resourceIndexer = ResourceIndexer(index)
 
     /**
      * Indexes all Kotlin source files in the project.
@@ -36,33 +39,52 @@ class ProjectIndexer(
         logger.info("Found ${modules.size} modules: ${modules.map { it.name }}")
 
         var totalSymbols = 0
+        val changedFiles = mutableListOf<File>()
 
         for (module in modules) {
             val moduleName = module.name
             logger.info("Indexing module: $moduleName")
 
-            // Find all Kotlin source directories
+            // Find all Kotlin/Java source directories
             val sourceDirs = findSourceDirectories(module)
             logger.debug("  Source dirs: ${sourceDirs.map { it.absolutePath }}")
 
             for (sourceDir in sourceDirs) {
-                val ktFiles = findKotlinFiles(sourceDir)
-                logger.debug("  Found ${ktFiles.size} Kotlin files in ${sourceDir.name}")
+                val ktFiles = findSourceFiles(sourceDir)
+                logger.debug("  Found ${ktFiles.size} source files in ${sourceDir.name}")
 
                 for (file in ktFiles) {
+                    // Skip files unchanged since the previous session (persistent index).
+                    if (isUnchanged(file)) {
+                        continue
+                    }
                     val symbols = indexFile(file, moduleName)
+                    changedFiles.add(file)
                     totalSymbols += symbols.size
                 }
             }
+
+            // Android XML resources (R.string.x / @layout/y navigation).
+            val resCount = resourceIndexer.indexModuleResources(module, moduleName)
+            if (resCount > 0) {
+                logger.debug("  Indexed $resCount resources in module $moduleName")
+            }
         }
 
-        // Store metadata
+        // Second pass: references (symbols of all modules must exist first so
+        // cross-file references resolve to real symbol ids).
+        for (file in changedFiles) {
+            index.removeRefsOfFile(file.absolutePath)
+            indexReferencesInFile(file)
+        }
+
+        // Store metadata (count reflects the full index contents, not just this run)
         index.setMeta("indexedAt", System.currentTimeMillis().toString())
         index.setMeta("projectRoot", projectRoot)
-        index.setMeta("symbolCount", totalSymbols.toString())
+        index.setMeta("symbolCount", index.countByPrefix("sym").toString())
 
-        logger.info("Indexed $totalSymbols symbols from ${modules.size} modules")
-        return totalSymbols
+        logger.info("Indexed $totalSymbols new/changed symbols from ${modules.size} modules")
+        return index.countByPrefix("sym")
     }
 
     /**
@@ -78,51 +100,73 @@ class ProjectIndexer(
         }
 
         val filePath = file.absolutePath
-        val docSymbols = analyzer.documentSymbols(content)
-        val symbols = extractSymbols(docSymbols, filePath, moduleName)
 
-        // Store symbols in index
+        // Clean previous entries for this file so re-indexing stays consistent.
+        index.removeFileSymbols(filePath)
+
+        val topLevel = when (file.extension) {
+            "java" -> javaAnalyzer.topLevelSymbols(content)
+            else -> analyzer.topLevelSymbols(content)
+        }
+        val symbols = extractSymbols(topLevel, filePath, moduleName)
+
         for (symbol in symbols) {
             index.putSymbol(symbol)
         }
+        index.setFileStamp(filePath, stampOf(file))
+        index.removeRefsOfFile(filePath)
+        indexReferencesInFile(file)
 
         logger.debug("Indexed ${symbols.size} symbols from ${file.name}")
         return symbols
     }
 
+    private fun stampOf(file: File): String = "${file.lastModified()}:${file.length()}"
+
+    /** True when the file's mtime+size match what we indexed previously. */
+    private fun isUnchanged(file: File): Boolean =
+        index.getFileStamp(file.absolutePath) == stampOf(file)
+
     /**
-     * Extracts SymbolInfo from LSP DocumentSymbol list.
+     * Converts the analyzer's hierarchical symbols into flat [SymbolInfo]
+     * records (children carry containerName/qualifiedName already).
      */
     private fun extractSymbols(
-        docSymbols: List<DocumentSymbol>,
+        symbols: List<com.androidstudioexperience.lsp.analysis.Symbol>,
         filePath: String,
         moduleName: String?,
-        container: String? = null
     ): List<SymbolInfo> {
         val result = mutableListOf<SymbolInfo>()
-
-        for (sym in docSymbols) {
-            val symbol = SymbolInfo(
-                id = SymbolInfo.makeId(filePath, sym.range.start.line, sym.name),
-                name = sym.name,
-                kind = sym.kind,
-                filePath = filePath,
-                line = sym.range.start.line,
-                col = sym.selectionRange.start.character,
-                containerName = container,
-                moduleName = moduleName
+        for (sym in symbols) {
+            result.add(
+                SymbolInfo(
+                    id = SymbolInfo.makeId(filePath, sym.range.start.line, sym.qualifiedName),
+                    name = sym.name,
+                    kind = sym.kind,
+                    filePath = filePath,
+                    line = sym.range.start.line,
+                    col = sym.nameRange.start.character,
+                    containerName = sym.containerName,
+                    moduleName = moduleName,
+                    signature = sym.signature.ifBlank { null },
+                    doc = sym.doc,
+                    parameters = sym.parameters,
+                    returnType = sym.returnType,
+                    superTypes = sym.superTypes,
+                    packageName = sym.packageName,
+                    visibility = sym.visibility,
+                )
             )
-            result.add(symbol)
-
-            // Recurse into children
             if (sym.children.isNotEmpty()) {
-                val childSymbols = extractSymbols(sym.children, filePath, moduleName, container = sym.name)
-                result.addAll(childSymbols)
+                result.addAll(extractSymbols(sym.children, filePath, moduleName))
             }
         }
-
         return result
     }
+
+    /** Re-indexes a single Android resource XML file. */
+    fun indexResourceFile(file: File, moduleName: String?) =
+        resourceIndexer.indexResourceFile(file, moduleName)
 
     /**
      * Finds all modules in the project by scanning for build.gradle files.
@@ -184,40 +228,75 @@ class ProjectIndexer(
                 .forEach { sourceDirs.add(it) }
         }
 
+        // KSP/KAPT/etc. generated sources (setting: ase.indexing.generatedSources).
+        if (includeGeneratedSources) {
+            val gen = File(module, "build/generated")
+            if (gen.isDirectory) {
+                gen.walkTopDown()
+                    .filter { it.isDirectory && (it.name == "kotlin" || it.name == "java") }
+                    .forEach { sourceDirs.add(it) }
+            }
+        }
+
         return sourceDirs.distinct()
     }
 
     /**
-     * Finds all Kotlin files in a directory tree.
+     * Finds all Kotlin/Java source files in a directory tree.
+     * Build output is excluded, except build/generated when the
+     * generated-sources setting is enabled.
      */
-    private fun findKotlinFiles(dir: File): List<File> {
+    private fun findSourceFiles(dir: File): List<File> {
         return dir.walk()
-            .filter { it.isFile && (it.extension == "kt" || it.extension == "kts") }
-            // Exclude build output regardless of platform separator
-            .filter { !it.absolutePath.replace('\\', '/').contains("/build/") }
+            .filter { it.isFile && (it.extension == "kt" || it.extension == "kts" || it.extension == "java") }
+            .filter { file ->
+                val p = file.absolutePath.replace('\\', '/')
+                !p.contains("/build/") || (includeGeneratedSources && p.contains("/build/generated/"))
+            }
             .toList()
     }
 
     /**
      * Finds all references to a symbol in the indexed files.
-     * This is a simple text-based search for the symbol name.
+     * Lexer-aware: comments and string literals are masked out before the
+     * word-boundary match (no hits inside `"${symbol.name}"` or comments).
+     * When the name is ambiguous (declared in multiple places), files are
+     * pre-filtered by package/import relation to the symbol's package.
      */
     fun findReferences(symbol: SymbolInfo): List<SymbolReference> {
         val references = mutableListOf<SymbolReference>()
-        
+
         // Get all indexed file paths
         val allSymbols = index.findByPartialName("", maxResults = 10000)
         val fileSet = allSymbols.map { it.filePath }.toSet()
+
+        val ambiguous = index.findByName(symbol.name).size > 1
+        val pattern = "\\b${Regex.escape(symbol.name)}\\b".toRegex()
 
         for (filePath in fileSet) {
             val file = File(filePath)
             if (!file.exists()) continue
 
-            val lines = file.readLines()
-            for ((lineIdx, line) in lines.withIndex()) {
-                // Simple text search for symbol name
-                // TODO: Use proper Kotlin parser to avoid false positives
-                val pattern = "\\b${Regex.escape(symbol.name)}\\b".toRegex()
+            val text = file.readText()
+            val maskedLines = com.androidstudioexperience.lsp.analysis.KotlinMask.maskLines(text)
+
+            // Ambiguity filter: only keep files that plausibly see THIS symbol
+            // (same package, explicit import, or fully-qualified usage).
+            if (ambiguous && symbol.packageName != null) {
+                val head = maskedLines.take(80)
+                val filePkg = head.firstNotNullOfOrNull {
+                    Regex("""^\s*package\s+([\w.]+)""").find(it)?.groupValues?.get(1)
+                }
+                val fqn = "${symbol.packageName}.${symbol.name}"
+                val imported = head.any { line ->
+                    val imp = Regex("""^\s*import\s+([\w.]+)""").find(line)?.groupValues?.get(1)
+                    imp == fqn || imp == "${symbol.packageName}.*"
+                }
+                val fqnUsed = text.contains(fqn)
+                if (filePkg != symbol.packageName && !imported && !fqnUsed) continue
+            }
+
+            for ((lineIdx, line) in maskedLines.withIndex()) {
                 for (match in pattern.findAll(line)) {
                     // Skip the declaration itself
                     if (lineIdx == symbol.line && match.range.first == symbol.col) continue
@@ -236,6 +315,44 @@ class ProjectIndexer(
         }
 
         return references
+    }
+
+    /**
+     * Collects identifier occurrences of indexed symbols within [file] and
+     * stores them as persistent references (prefix ref:). Called for
+     * new/changed files so CodeLens "N usages" stays cheap.
+     */
+    fun indexReferencesInFile(file: File) {
+        val text = try {
+            file.readText()
+        } catch (e: Exception) {
+            return
+        }
+        val maskedLines = com.androidstudioexperience.lsp.analysis.KotlinMask.maskLines(text)
+        val word = Regex("""\b[A-Za-z_]\w*\b""")
+        val byName = mutableMapOf<String, MutableList<Pair<Int, Int>>>()
+
+        for ((lineIdx, line) in maskedLines.withIndex()) {
+            for (m in word.findAll(line)) {
+                val name = m.value
+                if (name.length < 2 || name[0].isLowerCase() && !name.contains('_') && name.length < 4) {
+                    // cheap noise filter for local throwaway names
+                }
+                byName.getOrPut(name) { mutableListOf() }.add(lineIdx to m.range.first)
+            }
+        }
+
+        // Drop stale refs this file contributed previously, then re-add.
+        for ((name, positions) in byName) {
+            val symbols = index.findByName(name)
+            if (symbols.isEmpty()) continue
+            for (sym in symbols) {
+                val refs = positions.map { (line, col) ->
+                    SymbolReference(sym.id, file.absolutePath, line, col, name)
+                }
+                index.replaceFileReferences(sym.id, file.absolutePath, refs)
+            }
+        }
     }
 
     /**

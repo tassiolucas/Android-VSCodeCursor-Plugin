@@ -22,6 +22,12 @@ dependencies {
     // RocksDB — persistent symbol index
     implementation("org.rocksdb:rocksdbjni:9.7.3")
 
+    // ASM — bytecode reading for external library (.jar/.class) indexing
+    implementation("org.ow2.asm:asm:9.8")
+
+    // Vineflower — decompile .class from libraries for go-to-definition
+    implementation("org.vineflower:vineflower:1.11.1")
+
     testImplementation(kotlin("test"))
 }
 

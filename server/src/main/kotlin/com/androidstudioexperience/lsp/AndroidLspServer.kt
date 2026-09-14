@@ -2,6 +2,7 @@ package com.androidstudioexperience.lsp
 
 import com.androidstudioexperience.lsp.documents.DocumentManager
 import com.androidstudioexperience.lsp.index.IndexManager
+import com.androidstudioexperience.lsp.util.Uris
 import org.eclipse.lsp4j.DefinitionOptions
 import org.eclipse.lsp4j.DocumentSymbolOptions
 import org.eclipse.lsp4j.HoverOptions
@@ -44,31 +45,38 @@ class AndroidLspServer : LanguageServer, LanguageClientAware {
 
     override fun initialize(params: InitializeParams): CompletableFuture<InitializeResult> {
         rootUri = params.rootUri ?: params.workspaceFolders?.firstOrNull()?.uri
-        
+
+        // Client settings passed at initialize (contributed configuration).
+        val initOptions = params.initializationOptions as? com.google.gson.JsonObject
+        val includeGeneratedSources = initOptions?.get("generatedSources")?.asBoolean ?: true
+
         // Initialize index manager if we have a workspace root
         if (rootUri != null) {
-            val rootPath = uriToPath(rootUri!!)
+            val rootPath = Uris.uriToPath(rootUri!!)
             logger.info("Workspace root: $rootUri -> $rootPath")
-            indexManager = IndexManager.create(rootPath)
-            if (indexManager != null) {
-                logger.info("Index manager initialized for $rootPath")
-                // Start background indexing
-                CompletableFuture.runAsync {
-                    try {
-                        val count = indexManager!!.indexProject(rootPath)
-                        logger.info("Background indexing complete: $count symbols")
-                        client?.let { c ->
-                            c.showMessage(org.eclipse.lsp4j.MessageParams(
-                                org.eclipse.lsp4j.MessageType.Info,
-                                "ASE: Indexed $count symbols from project"
-                            ))
+            if (rootPath != null) {
+                indexManager = IndexManager.create(rootPath, includeGeneratedSources)
+                if (indexManager != null) {
+                    logger.info("Index manager initialized for $rootPath")
+                    // Start background indexing
+                    CompletableFuture.runAsync {
+                        try {
+                            val count = indexManager!!.indexProject(rootPath)
+                            logger.info("Background indexing complete: $count symbols")
+                            val libCount = indexManager!!.indexExternalLibraries(rootPath)
+                            client?.let { c ->
+                                c.showMessage(org.eclipse.lsp4j.MessageParams(
+                                    org.eclipse.lsp4j.MessageType.Info,
+                                    "ASE: Indexed $count symbols (project) + $libCount (libraries)"
+                                ))
+                            }
+                        } catch (e: Exception) {
+                            logger.error("Indexing failed: ${e.message}", e)
                         }
-                    } catch (e: Exception) {
-                        logger.error("Indexing failed: ${e.message}", e)
                     }
+                } else {
+                    logger.warn("Failed to initialize index manager (RocksDB native lib issue?)")
                 }
-            } else {
-                logger.warn("Failed to initialize index manager (RocksDB native lib issue?)")
             }
         }
 
@@ -89,6 +97,38 @@ class AndroidLspServer : LanguageServer, LanguageClientAware {
             definitionProvider = Either.forRight<Boolean, DefinitionOptions>(DefinitionOptions())
             documentSymbolProvider = Either.forRight<Boolean, DocumentSymbolOptions>(DocumentSymbolOptions())
             workspaceSymbolProvider = Either.forRight<Boolean, WorkspaceSymbolOptions>(WorkspaceSymbolOptions())
+            referencesProvider = Either.forRight<Boolean, org.eclipse.lsp4j.ReferenceOptions>(org.eclipse.lsp4j.ReferenceOptions())
+            signatureHelpProvider = org.eclipse.lsp4j.SignatureHelpOptions(
+                listOf("(", ","),
+                listOf(","),
+            )
+            documentHighlightProvider = Either.forRight<Boolean, org.eclipse.lsp4j.DocumentHighlightOptions>(
+                org.eclipse.lsp4j.DocumentHighlightOptions()
+            )
+            implementationProvider = Either.forRight<Boolean, org.eclipse.lsp4j.ImplementationRegistrationOptions>(
+                org.eclipse.lsp4j.ImplementationRegistrationOptions()
+            )
+            typeDefinitionProvider = Either.forRight<Boolean, org.eclipse.lsp4j.TypeDefinitionRegistrationOptions>(
+                org.eclipse.lsp4j.TypeDefinitionRegistrationOptions()
+            )
+            renameProvider = Either.forRight<Boolean, org.eclipse.lsp4j.RenameOptions>(
+                org.eclipse.lsp4j.RenameOptions(true)
+            )
+            callHierarchyProvider = Either.forRight<Boolean, org.eclipse.lsp4j.CallHierarchyRegistrationOptions>(
+                org.eclipse.lsp4j.CallHierarchyRegistrationOptions()
+            )
+            typeHierarchyProvider = Either.forRight<Boolean, org.eclipse.lsp4j.TypeHierarchyRegistrationOptions>(
+                org.eclipse.lsp4j.TypeHierarchyRegistrationOptions()
+            )
+            codeLensProvider = org.eclipse.lsp4j.CodeLensOptions(false)
+            inlayHintProvider = Either.forRight<Boolean, org.eclipse.lsp4j.InlayHintRegistrationOptions>(
+                org.eclipse.lsp4j.InlayHintRegistrationOptions()
+            )
+            executeCommandProvider = org.eclipse.lsp4j.ExecuteCommandOptions(listOf("ase.decompile"))
+            semanticTokensProvider = org.eclipse.lsp4j.SemanticTokensWithRegistrationOptions(
+                com.androidstudioexperience.lsp.analysis.SemanticTokensProvider.LEGEND,
+                org.eclipse.lsp4j.SemanticTokensServerFull(true)
+            )
         }
         return CompletableFuture.completedFuture(InitializeResult(capabilities))
     }
@@ -118,22 +158,5 @@ class AndroidLspServer : LanguageServer, LanguageClientAware {
     fun dispose() {
         indexManager?.close()
         documents.clear()
-    }
-
-    private fun uriToPath(uri: String): String {
-        return if (uri.startsWith("file:///")) {
-            val decoded = try {
-                java.net.URLDecoder.decode(uri.removePrefix("file:///"), "UTF-8")
-            } catch (e: Exception) {
-                uri.removePrefix("file:///")
-            }
-            if (System.getProperty("os.name").lowercase().contains("win")) {
-                decoded.replace('/', '\\')
-            } else {
-                decoded
-            }
-        } else {
-            uri
-        }
     }
 }

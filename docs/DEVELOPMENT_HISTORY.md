@@ -345,6 +345,280 @@ git push -u origin main
 
 ---
 
+## 11. Migração para Linux + verificação (2026-09-13)
+
+Migração do ambiente Windows para **Linux (Omarchy/Arch, `~/.local/share/mise`)**, clone do repo via GitHub, e revalidação completa do build/testes — com um **bug de Linux corrigido** descoberto na verificação.
+
+### Ambiente
+
+| Item | Valor |
+|------|-------|
+| Repo | clonado em `~/Projetos/Android-VSCodeCursor-Plugin` |
+| JDK | **21.0.2** via `mise use -g java@21` (não havia JDK no sistema) |
+| Node | 26.7.0 (mise) |
+| Workspace de teste | `git clone git@github.com:android/kotlin-multiplatform-samples.git ~/Projetos/kotlin-multiplatform-samples` → projeto **`Fruitties`** (módulos `:shared`, `:androidApp`) |
+| Host key | `ssh-keyscan github.com >> ~/.ssh/known_hosts` (primeiro clone falhava com `Host key verification failed`) |
+
+### Bug crítico corrigido: URI → path relativo no Linux
+
+**Sintoma:** `uriToPath("file:///home/user/x.kt")` retornava `home/user/x.kt` (sem `/` inicial) porque usava `removePrefix("file:///")`. No Windows o resultado é correto (`d:/...`); no Linux o path virava **relativo ao CWD** → `didOpen`/`didSave`/`definition` cross-file tentavam ler `/cwd/.../x.kt` e falhavam. O smoke test mostrou `Failed to read file .../Android-VSCodeCursor-Plugin/tmp/demo/Hello.kt`.
+
+**Correção:** utilitário central `server/.../util/Uris.kt` com `uriToPath()` que, em plataforma não-Windows, **prepend `/`** quando o path decodificado não começa com `/`. As 3 cópias duplicadas (`AndroidLspServer`, `TextDocumentService`, `WorkspaceService`) agora delegam ao utilitário. `DocumentManager.uriToPath` (via `Paths.get(URI.create)`) já estava correto.
+
+**Testes:** novo `UrisTest` (4 testes) cobrindo path absoluto Linux com `%20`, uri não-`file`, decode percent e uri malformada → **7 unit tests, 0 falhas**.
+
+### Smoke test real (`scripts/test-lsp.js`)
+
+Reescrito para validar indexação cross-module de verdade:
+- Workspace via `ASE_TEST_WORKSPACE` (fallback: `test-workspace/`); `rootUri` montado com `pathToFileURL`.
+- `workspace/symbol(*)` **falha** se retornar 0 (garante que o índice cross-module populou).
+- Posição de hover/definition escolhida automaticamente sobre uma declaração que o analyzer estrutural reconhece (nome após a keyword, alinhado com o cálculo de coluna do `KotlinAnalyzer`).
+
+Resultado contra `Fruitties`:
+
+```
+Found 3 modules: [Fruitties, androidApp, shared]
+Indexed 82 symbols from 3 modules
+[OK] hover  -> fun/val assinatura (ex.: `val dbFile`, _Declared in_ Factory.native.kt:33)
+[OK] definition -> file:///home/tassiolucas/.../Factory.native.kt (URI absoluta correta)
+[OK] workspace/symbol(*) -> 50
+== ALL CHECKS PASSED ==
+```
+
+### Teste de integração VS Code
+
+`src/test/suite/extension.real.test.ts` ficou **agnóstico de projeto** (antes esperava o Weave App: `composeApp/.../App.kt`). Agora varre o workspace, acha qualquer declaração analisável e verifica hover.
+
+```
+✔ LSP activates and hover works on a real KMP source file (8089ms)
+1 passing
+Integration tests passed.
+```
+
+### Notas
+
+- `server/gradlew` veio **sem permissão de execução** no clone → `chmod +x gradlew` (configurar `core.fileMode` ou `.gitattributes` em repo futuro se recorrente).
+- Build: `./gradlew installDist --no-daemon` → **BUILD SUCCESSFUL** (warnings de depreciação do LSP4J apenas).
+
+---
+
+## 12. Fase 3 — Libs externas: classpath real + indexação ASM + decompilação (2026-09-13)
+
+Rota decidida com o usuário: **pragmática (ASM + classpath)** — a Kotlin Analysis API standalone se provou **não publicável de forma consumível** (ver 12.1). Objetivo: navegar para `.kt`/`.class` de libs e colorir classes sem resolução de tipos completa.
+
+### 12.1 Por que NÃO Analysis API standalone
+
+Pesquisa de viabilidade (Milestone 1) concluiu que o artifact **não existe publicado**:
+
+| Verificação | Resultado |
+|---|---|
+| `org.jetbrains.kotlin:analysis-api-standalone` (Central / IntelliJ Deps / KotlinDev) | **404 em todos** |
+| `analysis-api-standalone-for-ide` (único existente) | Só **dev builds** (`2.3.0-dev-*`, `2.3.20-dev-*`, `2.5.0-dev-*`) |
+| POM do `-for-ide` | Referencia `analysis-api-standalone-base`/`-fir-standalone-base`/`analysis-api-standalone` **não publicados** → resolução Gradle falha (testado) |
+| Sub-módulos `kotlin-analysis-api-*` | Versão `0.1.0.0-dev-*`, outra linha de build |
+| Runtime | Exige `intellij-core` (IntelliJ core repackeado) mesmo assim |
+
+Conclusão: a Analysis API só é distribuída para tooling baseado em IntelliJ. **Spike do Milestone 1 virou decisão:** construir o próprio motor semântico sobre `kotlin-compiler` (PSI/FIR) era API de baixo nível (semanas); opção pragmática escolhida.
+
+### 12.2 Arquivos novos
+
+| Arquivo | Responsabilidade |
+|---------|------------------|
+| `server/.../index/ClasspathResolver.kt` | Roda `gradlew aseDumpClasspath` (init script embutido como resource) e parseia o classpath real por módulo |
+| `server/src/main/resources/ase-dump-classpath.init.gradle.kts` | Init script: task que imprime `*CompileClasspath` (sem test/metadata/klib) |
+| `server/.../index/LibraryIndexer.kt` | Lê `.class` de jars (e `classes.jar` de aars) com **ASM** e extrai símbolos (limpa `getX`→property, remove sintéticos/anônimos) |
+| `server/.../index/LibrarySymbol.kt` | Modelo de símbolo de lib (`className` interno, `memberName`, `jarPath`, `artifact`) + `toUri()` `ase-lib:` |
+| `server/.../index/LibraryDecompiler.kt` | Decompila `.class` sob demanda com **Vineflower** (`BaseDecompiler` + `IResultSaver` em memória) |
+| `server/src/test/.../LibraryIndexerTest.kt` | 3 testes (gera bytecode via ASM, valida indexação, parse do classpath) |
+| `scripts/test-libraries.js` | Teste e2e de libs (polling até Gradle indexar, definition → `ase-lib:`, decompile) |
+| `src/extension.ts` | `AseLibContentProvider` (scheme `ase-lib:`) + setTextDocumentLanguage(java) |
+
+### 12.3 Fluxo implementado
+
+1. `IndexManager.indexExternalLibraries()` (background, após `indexProject`) → `ClasspathResolver` roda `gradlew aseDumpClasspath` → lista jars/aars do compile classpath real.
+2. `LibraryIndexer` (ASM) indexa classes/interfaces/enums + membros de cada jar/aar → RocksDB (`libsym:`/`libname:` prefixos).
+3. `textDocument/definition` com 3º fallback: projeto in-file → índice cross-file → **índice de libs** → devolve `Location` com URI `ase-lib:<jar>!<class>[#member]`.
+4. VS Code abre o scheme `ase-lib:` → `AseLibContentProvider` chama `workspace/executeCommand ase.decompile` → servidor decompila o `.class` (Vineflower) → documento virtual read-only (Java).
+
+### 12.4 Resultados verificados (Fruitties)
+
+```
+Found 3 modules: [Fruitties, androidApp, shared]   Indexed 82 symbols (project)
+Resolving classpath: gradlew aseDumpClasspath ...   (~40s primeira execução, --no-daemon)
+Indexed 40413 external library symbols from 89 jars/aars
+workspace/symbol(Room)  -> ase-lib:/.../room-runtime.aar!androidx/room/Room
+textDocument/definition (Room.databaseBuilder) -> ase-lib:/...room-runtime.aar!androidx/room/Room
+workspace/executeCommand ase.decompile           -> "public object Room { ... }"
+Integração VS Code: go-to-definition abre doc virtual decompilado ✔ (2 passing no total)
+```
+
+### 12.5 Testes
+
+- Unit (Kotlin): **10 testes** (3 analyzer + 4 Uris + 3 LibraryIndexer) — 0 falhas
+- `npm run test:lsp` — ALL CHECKS PASSED (smoke contra `test-workspace/`)
+- `ASE_TEST_WORKSPACE=... npm run test:libraries` — ALL LIBRARY CHECKS PASSED
+- `ASE_TEST_WORKSPACE=... npm run test:integration` — **2 passing** (hover + definition para lib decompilada)
+
+### 12.6 Observações / limitações
+
+- Classpath resolution roda `gradlew` no startup (background); ~40s na primeira execução. **Candidato a cache/daemon (M6).**
+- Símbolos de lib são por **nome simples** (sem FQCN resolve) — go-to-definition escolhe classe sobre membro; pode haver ambigüidade entre libs.
+- Decompilação é sob demanda com cache em memória; ponto 0,0 (topo do arquivo) — sem mapeamento linha exata ainda.
+- `-metadata` jars (KMP common) são ignorados (sem `.class`); a indexação usa o classpath JVM/Android.
+
+---
+
+## 13. Navegação completa estilo Android Studio (2026-09-13)
+
+Usuário reportou símbolos não navegáveis no Fruitties: `CartItemDetails`, `AppDatabase`, `fruittieDao()`, `loadMapped()`, `database`.
+
+### Causa raiz
+
+O parser estrutural do `KotlinAnalyzer` só reconhecia linhas começando **exatamente** com `fun/class/interface/object/val/var/enum class`. Qualquer **modificador** (`abstract`, `data`, `private`, `suspend`, `override`, `sealed`, `internal`, `expect/actual`, ...) ou **anotação na mesma linha** fazia o símbolo ser ignorado → não indexado → sem go-to-definition nem hover.
+
+| Símbolo reportado | Declaração real | Motivo da falha |
+|---|---|---|
+| `CartItemDetails` | `data class CartItemDetails(` | `data` |
+| `AppDatabase` | `abstract class AppDatabase : RoomDatabase()` | `abstract` |
+| `fruittieDao()` | `abstract fun fruittieDao(): FruittieDao` | `abstract` |
+| `loadMapped()` | `suspend fun loadMapped(...)` | `suspend` |
+| `database` | `private var database: AppDatabase,` (construtor) | `private` |
+
+### Correções
+
+**`KotlinAnalyzer.kt` — parser reescrito** (`FUN`/`CLASS_LIKE`/`VAL_VAR` regex):
+- Prefixo opcional de anotações (mesma linha, `@Anno(args)` com parênteses balanceados) + modificadores antes da keyword
+- Suporta `data/sealed/abstract/open/final/inner/annotation/enum class`, `companion object`, `expect/actual`, `override`, `suspend/inline/infix/operator/tailrec/const/lateinit`
+- Extensões `fun Receiver.name(...)` e genéricas `fun <T> Receiver<T>.name(...)`
+- `fun interface`, propriedades em construtor primário (`private var x: T,`)
+- `nameRange` mapeado na linha original (coluna exata)
+- Novos métodos: `declarationSymbol`, `definitionOf`, `hoverOnDeclaration`
+
+**`TextDocumentService.kt` — definition/hover universais:**
+- Cadeia: `extractSymbolAtPosition` → declaração in-file por nome → índice do projeto → índice de libs
+- Funciona para **qualquer identificador** (propriedades, tipos, chamadas), não só declarações/calls
+- Hover fora de declaração mostra assinatura do símbolo (projeto: `kind name` + arquivo:linha; lib: `package.Class.member` + artifact)
+
+### Verificação
+
+```
+[OK] CartItemDetails -> fruitties/model/Fruittie.kt:34   (data class)
+[OK] AppDatabase     -> fruitties/database/AppDatabase.kt:25 (abstract class)
+[OK] fruittieDao     -> fruitties/database/AppDatabase.kt:26 (abstract fun)
+[OK] loadMapped      -> fruitties/database/FruittieDao.kt:46 (suspend fun)
+[OK] database        -> DataRepository.kt:31              (private var construtor)
+```
+
+- Unit: **12 testes** (5 analyzer, 3 LibraryIndexer, 4 Uris) — 0 falhas
+- `test:lsp`, `test:libraries` verdes; integração VS Code **2 passing**
+- Novo script `scripts/verify-navigation.js` (`npm run test:navigation`) cobre os 5 símbolos
+
+### Limites honestos (sem sistema de tipos)
+
+- Membros herdados (`toString`, `equals`), overloads por assinatura e resolução por tipo do receiver (`flow.map` vs `list.map`) continuam limitados — exigem motor semântico (roadmap).
+- `expect`→`actual` resolve pelo mesmo nome via índice (sem distinção de alvo).
+
+---
+
+## 14. Fase 3 (cont.) — Semantic tokens, find references e índice persistente (2026-09-13)
+
+### 14.1 Semantic highlighting (`textDocument/semanticTokens/full`)
+
+Como o plugin **não tem gramática TextMate**, os arquivos Kotlin não tinham *nenhuma* coloração. Agora há um provider próprio (`analysis/SemanticTokensProvider.kt`):
+
+- **Lexer próprio** (state machine por caractere) que classifica comentários (`//`, `/* */`), strings (`"..."`, `"""..."""`), chars, números e anotações (`@...`) — cobrindo o highlighting básico que faltava.
+- **Identificadores** são resolvidos por nome na cadeia: declaração in-file → índice do projeto → índice de libs → **heurística** (inicial maiúscula → class).
+- Legend: class/interface/enum/enumMember/function/property/variable/keyword/string/number/comment/decorator + modificadores `declaration` e `defaultLibrary`.
+- `package.json` → `contributes.configurationDefaults["[kotlin]"]["editor.semanticHighlighting.enabled"] = true` — garante que o highlight funcione **mesmo em temas que não habilitam semanticHighlighting** (ex.: tokyo-night, que não define `semanticHighlighting: true`).
+
+> Por que isso importa: o usuário usa o tema tokyo-night, que tem `semanticTokenColors` mas não habilita o recurso; sem o `configurationDefaults` nada mudaria visualmente.
+
+### 14.2 Find references (`textDocument/references`)
+
+- Novo handler `references()` no `TextDocumentService` usando o `IndexManager.findReferences` (text-based) — busca `\b<nome>\b` em todos os arquivos indexados; respeita `includeDeclaration`.
+- Corrigido o bug de URI em `SymbolReference.toLocation` (`file://` sem `/` → agora usa `SymbolInfo.filePathToUri`).
+- Capability `referencesProvider` registrada.
+
+### 14.3 Índice persistente (sem re-index a cada abertura)
+
+O índice era **destruído e recriado a cada startup** (e as libs re-indexadas com Gradle+ASM ~40s). Agora:
+
+| Antes | Depois |
+|---|---|
+| `RocksDB.destroyDB` na abertura | Abre persistente |
+| Re-index de todos os arquivos | Pula arquivos inalterados (stamp mtime+size, chave `file:{path}`) |
+| Libs re-indexadas sempre | Cache por stamp de build files (`classpathStamp`); se inalterado → reutiliza (sem Gradle/ASM) |
+
+Novos métodos em `RocksDbIndex`: `removeFileSymbols`, `setFileStamp`/`getFileStamp`, `deleteByPrefix`, `clearLibraries`, `countByPrefix`. `ProjectIndexer` pula arquivos inalterados e limpa símbolos ao re-indexar. `IndexManager.removeFile` agora deleta de verdade (era stub).
+
+**Resultado medido (Fruitties):** 1ª execução ~16s (Gradle + 40.413 símbolos de libs); 2ª ~1.6s com `Reusing cached library index`.
+
+**Bugfix pós-persistência — corrupção do RocksDB:** com o índice persistente, um `SIGKILL` durante escrita (restart loop do VS Code) deixava o DB corrompido (`MANIFEST` apontando para `.sst` inexistente) e o servidor crashava em loop no `initialize`. Correções:
+- `RocksDbIndex.openOrCreate` agora **detecta corrupção e recupera** (destroy + recria vazio → re-index do zero). Lock contention (outro processo com o LOCK) **não** destrói — retorna null graciosamente.
+- `Main.kt`: shutdown hook fecha o DB em `exit`/SIGTERM (reduz chance de corrupção; SIGKILL é coberto pela recuperação).
+
+Verificado: rodando contra o índice corrompido → `Corrupted index detected ... recreating from scratch` e servidor sobe normal.
+
+### 14.4 Testes
+
+- Unit: **15 testes** (5 analyzer, 3 LibraryIndexer, 3 SemanticTokensProvider, 4 Uris) — 0 falhas
+- `test:lsp`, `test:libraries`, `test:navigation` verdes; integração VS Code **2 passing**
+- Capabilities do servidor agora: hover, definition, documentSymbol, workspaceSymbol, references, semanticTokens, executeCommand
+
+---
+
+## 15. Fase 3.5 — Paridade de navegação/leitura com Android Studio (2026-09-13)
+
+Auditoria do escopo "indexação, navegação e leitura de funções/classes/objetos" comparando com o Android Studio. Achados principais na varredura do código: `signatureHelp` e `completion` eram stubs; `SymbolInfo` não guardava assinatura/doc; `documentSymbol` era flat; `containerName` nunca populado; colisão de mesmo nome por arquivo; prefixo `ref:` ocioso; zero suporte a recursos XML e `.java`; `didChangeWatchedFiles` com TODOs.
+
+### 15.1 Índice v2 + analyzer hierárquico (fundação)
+
+- **`KotlinMask`** (novo): lexer que mascara comentários/strings preservando colunas — base de todo o matching estrutural (parser, documentHighlight, find usages, inlay hints).
+- **`KotlinAnalyzer` reescrito**: modelo hierárquico real (classes → membros em `children`), assinaturas multi-linha, construtores (primário via propriedades `val/var` + secundários), `typealias`, enum entries, `companion object`, visibilidade, `superTypes`, `packageName`, `parameters` (nome/tipo/default), `returnType`, `qualifiedName` (`Classe.membro` — fim da colisão de mesmo nome).
+- **Schema v2** (`SymbolInfo` + `RocksDbIndex`): persistidos signature/doc/params/returnType/superTypes/package/visibility; migração automática via `meta:schemaVersion` (clear + re-index).
+- Consequências imediatas: hover cross-file rico (assinatura + KDoc = `Ctrl+Q` do AS), outline/breadcrumbs hierárquicos, `Ctrl+T` com container.
+
+### 15.2 Signature Help — o `Ctrl+P` do Android Studio
+
+- **`CallSiteParser`** (novo): scan reverso balanceado de parênteses a partir do cursor (sobre texto mascarado), callee antes do `(`, skip de genéricos, parâmetro ativo = vírgulas top-level; keywords (`if`/`when`/...) rejeitadas.
+- Candidatos: in-file → índice v2 → **libs** (descritor JVM `(Ljava/lang/String;I)V` traduzido para assinatura legível via `JvmSignatures`).
+- `LibraryIndexer` agora indexa **construtores** (`<init>` com id próprio — antes colidiam com a classe).
+- Keybinding `Ctrl+P` → `triggerParameterHints` com `when` restrito a editor Kotlin/Java (Quick Open preservado fora).
+
+### 15.3 Navegação avançada (handlers LSP novos)
+
+`documentHighlight`, `implementation` (índice de superTypes), `typeDefinition` (tipo declarado), **definition multi-candidato** (`LocationLink[]` — resolve expect/actual e ambiguidades no peek, como o AS), `callHierarchy` (incoming via refs + `enclosingDeclaration`; outgoing via refs do corpo da função), `typeHierarchy` (supertypes/subtypes), `rename` + `prepareRename` (cross-file via índice; in-file lexer-aware), `workspace/symbol` camelCase (`"Lh"` → `LegacyHelper`), `didChangeWatchedFiles` incremental real (Created/Changed/Deleted, com detecção de módulo).
+
+### 15.4 Ecossistema Android + Java + gerados
+
+- **`ResourceIndexer`** (novo): `res/values/*.xml` (string/color/dimen/style/...), file-based (layout/drawable/menu/...), `@+id/` — chave `res:{type}:{name}`, múltiplas configurações, incremental por arquivo.
+- `definition` resolve `R.<type>.<name>` → localização exata no XML (etapa 0 da cadeia).
+- **`JavaAnalyzer`** (novo): estrutural para `.java` (classes/interfaces/enums, métodos, construtores, campos, superTypes de extends/implements, javadoc) — projetos mistos indexados.
+- **KSP/KAPT**: setting `ase.indexing.generatedSources` agora funciona — client passa `initializationOptions.generatedSources`, scanner inclui `build/generated/**` (filtro `/build/` ajustado).
+
+### 15.5 Find usages de qualidade + CodeLens + Inlay hints
+
+- `findReferences` lexer-aware (máscara de comentários/strings) + filtro de ambiguidade por pacote/import/FQN quando o nome é ambíguo.
+- Referências **persistidas** na indexação (dois passes: símbolos → refs) — `replaceFileReferences` por arquivo.
+- **CodeLens "N usages"** sobre declarações (contagem via refs persistidas; clique dispara `ase.showReferences` → `vscode.executeReferenceProvider` → peek nativo).
+- **Inlay hints** de nome de parâmetro em call-sites (split top-level de argumentos; skip de named args e keywords).
+- **Keymap AS completo** no `package.json` (11 rebinds com `when` Kotlin/Java): Ctrl+P, Ctrl+B, Ctrl+Alt+B, Ctrl+Shift+B, Alt+F7, Ctrl+F12, Ctrl+Q, Ctrl+H, Ctrl+Alt+H, Shift+F6, Ctrl+W.
+
+### 15.6 Limites conhecidos (estrutural, sem motor semântico)
+
+- Overloads precisos por assinatura, receiver-type (`flow.map` vs `list.map`), type inference: fora do escopo estrutural — mitigados por definition multi-candidato e filtro de ambiguidade. Motor semântico sobre `kotlin-compiler` segue no roadmap.
+- Membros de classes em linha única (`class A { fun f() {} }`) não são indexados (mesma limitação da Fase 1).
+- `typeDefinition` exige tipo declarado explícito (não infere `val x = Foo()`).
+- CodeLens "N usages" usa refs persistidas (aproximado entre edits; o clique mostra o resultado exato query-time).
+
+### 15.7 Testes e verificação
+
+- Unit: **37 testes, 0 falhas** (KotlinAnalyzer 10, CallSiteParser 11, RocksDbIndex 2, ResourceIndexer 1, JavaAnalyzer 3, LibraryIndexer 3, SemanticTokens 3, Uris 4).
+- `test:lsp` reescrito sobre fixture novo (`test-workspace/` = 2 módulos, Kotlin+Java+res): **20 checks** — 15 capabilities + hover, definition (cross-module e `R.string`), signatureHelp, documentSymbol hierárquico, documentHighlight, implementation, typeDefinition, prepareRename, references, callHierarchy, typeHierarchy, codeLens, inlayHint, workspace/symbol (+camelCase). **ALL CHECKS PASSED.**
+- Capabilities do servidor agora (15): hover, definition, documentSymbol, workspaceSymbol, references, signatureHelp, documentHighlight, implementation, typeDefinition, rename(+prepare), callHierarchy, typeHierarchy, codeLens, inlayHint, semanticTokens, executeCommand.
+
+---
+
 ## Apêndice A — Arquivos-fonte principais (mapa rápido)
 
 | Arquivo | Responsabilidade |
@@ -355,11 +629,16 @@ git push -u origin main
 | `server/.../TextDocumentService.kt` | didOpen/didChange/didSave, hover, definition (in-file → cross-file via índice), documentSymbol |
 | `server/.../WorkspaceService.kt` | workspace/symbol (índice com fallback), didChangeWatchedFiles |
 | `server/.../documents/DocumentManager.kt` | Store de documentos abertos (sync incremental) |
-| `server/.../analysis/KotlinAnalyzer.kt` | Analyzer estrutural (regex/linhas): hover, definition, documentSymbols, findSymbols |
-| `server/.../index/SymbolInfo.kt` | Data classes; `filePathToUri()` (normalização cross-platform) |
-| `server/.../index/RocksDbIndex.kt` | Storage RocksDB; JSON com escape/unescape corretos |
-| `server/.../index/ProjectIndexer.kt` | Scanner de módulos + arquivos; filtro de build dir |
-| `server/.../index/IndexManager.kt` | Orquestração: indexProject, indexFile, findDefinition, searchSymbols |
+| `server/.../analysis/KotlinAnalyzer.kt` | Analyzer estrutural hierárquico (regex/linhas): modelo com signature/params/superTypes |
+| `server/.../analysis/KotlinMask.kt` | Lexer de máscara (comentários/strings preservando colunas) |
+| `server/.../analysis/JavaAnalyzer.kt` | Analyzer estrutural Java (classes, métodos, campos, superTypes) |
+| `server/.../analysis/CallSiteParser.kt` | Parser de call-site para signature help (parâmetro ativo) |
+| `server/.../index/JvmSignatures.kt` | Descritor JVM → assinatura Kotlin legível (hover/signature help de libs) |
+| `server/.../index/ResourceIndexer.kt` | Recursos Android (values XML, layouts, ids) → `R.*` navegável |
+| `server/.../index/SymbolInfo.kt` | Data classes (schema v2); `filePathToUri()` (normalização cross-platform) |
+| `server/.../index/RocksDbIndex.kt` | Storage RocksDB; JSON com escape/unescape corretos; camelCase; refs persistidas |
+| `server/.../index/ProjectIndexer.kt` | Scanner de módulos + arquivos (kt/kts/java + gerados); refs em 2 passes; resources |
+| `server/.../index/IndexManager.kt` | Orquestração: indexProject, indexFile, find(All)Definitions, implementations, resources |
 
 ## Apêndice B — Dependências
 

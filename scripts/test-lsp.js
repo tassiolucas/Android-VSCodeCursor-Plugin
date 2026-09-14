@@ -2,14 +2,24 @@
 /**
  * Smoke test for the ASE LSP server.
  *
- * Spawns the Kotlin server, sends real LSP messages over stdio:
- *   initialize -> initialized -> didOpen -> hover -> definition -> shutdown -> exit
+ * Spawns the Kotlin server, sends real LSP messages over stdio and verifies
+ * the Android-Studio-parity feature surface:
+ *   initialize -> hover -> definition (+cross-module, +resources)
+ *   -> signatureHelp -> documentSymbol (hierarchy) -> semanticTokens
+ *   -> documentHighlight -> implementation -> typeDefinition
+ *   -> prepareRename -> references -> callHierarchy -> typeHierarchy
+ *   -> codeLens -> inlayHint -> workspace/symbol (+camelCase) -> shutdown
  *
- * Usage: node test-lsp.js [path-to-server-jar]
+ * Workspace under test:
+ *   - ASE_TEST_WORKSPACE env var, if set (absolute path to a real project), OR
+ *   - <repo>/test-workspace fixture (2 modules, Kotlin+Java+res).
+ *
+ * Usage: node test-lsp.js
  */
 const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
+const { pathToFileURL } = require('url');
 
 const serverDir = path.join(__dirname, '..', 'server', 'build', 'install', 'ase-lsp-server', 'bin');
 const isWin = process.platform === 'win32';
@@ -37,7 +47,7 @@ function send(method, params) {
         pending.delete(id);
         reject(new Error(`Timeout waiting for ${method}`));
       }
-    }, 15000);
+    }, 30000);
   });
 }
 
@@ -70,74 +80,248 @@ child.stdout.on('data', (chunk) => {
   }
 });
 
-child.stderr.on('data', (d) => process.stderr.write(d));
+child.stderr.on('data', () => {}); // server logs are noisy; keep stdout protocol clean
 
-const sampleKotlin = `package com.example.demo
-
-/**
- * Greets a person.
- */
-fun greet(name: String): String {
-    return "Hello, \$name!"
+/** Position of `needle` (plus offset) inside `text`. */
+function posOf(text, needle, offsetInNeedle = 0) {
+  const idx = text.indexOf(needle);
+  if (idx === -1) throw new Error(`needle not found: ${needle}`);
+  const upto = text.slice(0, idx + offsetInNeedle);
+  const lines = upto.split('\n');
+  return { line: lines.length - 1, character: lines[lines.length - 1].length };
 }
 
-class Greeter {
-    fun sayHello(): String = greet("World")
+function flattenSymbols(symbols) {
+  const out = [];
+  for (const s of symbols || []) {
+    out.push(s);
+    out.push(...flattenSymbols(s.children || []));
+  }
+  return out;
 }
-
-fun main() {
-    val g = Greeter()
-    println(g.sayHello())
-}
-`;
 
 async function main() {
   console.log('== ASE LSP Server smoke test ==\n');
 
+  const workspace = process.env.ASE_TEST_WORKSPACE
+    ? process.env.ASE_TEST_WORKSPACE
+    : path.join(__dirname, '..', 'test-workspace');
+  if (!fs.existsSync(workspace)) {
+    throw new Error(`Workspace not found: ${workspace} (set ASE_TEST_WORKSPACE)`);
+  }
+  console.log(`Workspace: ${workspace}`);
+
+  const usingFixture = !process.env.ASE_TEST_WORKSPACE;
+  const rootUri = pathToFileURL(workspace).href;
+
+  const coreFile = path.join(workspace, 'core/src/main/kotlin/com/example/core/Greeter.kt');
+  const appFile = path.join(workspace, 'app/src/main/kotlin/com/example/app/Main.kt');
+  const hasFixtureFiles = fs.existsSync(coreFile) && fs.existsSync(appFile);
+
   // 1. initialize
   const initResult = await send('initialize', {
     processId: process.pid,
-    rootUri: 'file:///tmp/demo',
+    rootUri,
     capabilities: {},
   });
-  console.log('[OK] initialize ->', JSON.stringify(initResult.capabilities).slice(0, 160));
+  const caps = initResult.capabilities;
+  console.log('[OK] initialize');
+  for (const cap of [
+    'hoverProvider', 'definitionProvider', 'documentSymbolProvider',
+    'workspaceSymbolProvider', 'referencesProvider', 'signatureHelpProvider',
+    'documentHighlightProvider', 'implementationProvider', 'typeDefinitionProvider',
+    'renameProvider', 'callHierarchyProvider', 'typeHierarchyProvider',
+    'codeLensProvider', 'inlayHintProvider', 'semanticTokensProvider',
+  ]) {
+    if (!caps[cap]) throw new Error(`missing capability: ${cap}`);
+  }
+  console.log('[OK] all 15 capabilities advertised');
 
   sendNotify('initialized', {});
 
-  // 2. didOpen
-  const uri = 'file:///tmp/demo/Hello.kt';
-  sendNotify('textDocument/didOpen', {
-    textDocument: { uri, languageId: 'kotlin', version: 1, text: sampleKotlin },
-  });
-  console.log('[OK] didOpen (Hello.kt)');
+  // Wait for background indexing to finish so workspace/symbol hits the index.
+  await new Promise((r) => setTimeout(r, 5000));
 
-  // 3. hover over "greet" (line 5, col 8)
-  const hover = await send('textDocument/hover', {
-    textDocument: { uri },
-    position: { line: 5, character: 8 },
-  });
-  console.log('[OK] hover on greet ->', JSON.stringify(hover && hover.contents).slice(0, 200));
+  if (!hasFixtureFiles) {
+    console.log('[SKIP] fixture files not found in this workspace; basic checks only');
+  }
 
-  // 4. definition of "greet" called in Greeter.sayHello (line 10, col 31)
-  const def = await send('textDocument/definition', {
-    textDocument: { uri },
-    position: { line: 10, character: 31 },
-  });
-  console.log('[OK] definition ->', JSON.stringify(def).slice(0, 200));
+  const coreText = hasFixtureFiles ? fs.readFileSync(coreFile, 'utf8') : null;
+  const appText = hasFixtureFiles ? fs.readFileSync(appFile, 'utf8') : null;
+  const coreUri = hasFixtureFiles ? pathToFileURL(coreFile).href : null;
+  const appUri = hasFixtureFiles ? pathToFileURL(appFile).href : null;
 
-  // 5. documentSymbol
-  const symbols = await send('textDocument/documentSymbol', {
-    textDocument: { uri },
-  });
-  const names = symbols ? symbols.map((s) => s.name).filter(Boolean) : [];
-  console.log('[OK] documentSymbol ->', JSON.stringify(names));
+  if (hasFixtureFiles) {
+    sendNotify('textDocument/didOpen', { textDocument: { uri: coreUri, languageId: 'kotlin', version: 1, text: coreText } });
+    sendNotify('textDocument/didOpen', { textDocument: { uri: appUri, languageId: 'kotlin', version: 1, text: appText } });
+    console.log('[OK] didOpen core/app');
+    await new Promise((r) => setTimeout(r, 500));
 
-  // 6. workspace/symbol
-  const wsSymbols = await send('workspace/symbol', { query: 'greet' });
+    // 2. hover on declaration (with KDoc + signature)
+    const hover = await send('textDocument/hover', {
+      textDocument: { uri: coreUri },
+      position: posOf(coreText, 'greet(', 1),
+    });
+    if (!hover || !JSON.stringify(hover.contents).includes('greet')) {
+      throw new Error('hover on greet returned no signature');
+    }
+    console.log('[OK] hover -> signature present');
+
+    // 3. cross-module definition: greet usage in app -> core/Greeter.kt
+    const def = await send('textDocument/definition', {
+      textDocument: { uri: appUri },
+      position: posOf(appText, 'greet("App")', 2),
+    });
+    const defList = Array.isArray(def) ? def : [];
+    if (!defList.some((d) => (d.uri || d.targetUri || '').endsWith('Greeter.kt'))) {
+      throw new Error('cross-module definition of greet did not resolve to Greeter.kt: ' + JSON.stringify(def));
+    }
+    console.log('[OK] definition (cross-module) -> core/Greeter.kt');
+
+    // 3b. resource definition: R.string.app_name -> strings.xml
+    const resDef = await send('textDocument/definition', {
+      textDocument: { uri: appUri },
+      position: posOf(appText, 'app_name', 2),
+    });
+    const resList = Array.isArray(resDef) ? resDef : [];
+    if (!resList.some((d) => (d.uri || '').endsWith('strings.xml'))) {
+      throw new Error('R.string.app_name did not resolve to strings.xml: ' + JSON.stringify(resDef));
+    }
+    console.log('[OK] definition (R.string.app_name) -> strings.xml');
+
+    // 4. signature help inside greet("App" — the AS Ctrl+P equivalent.
+    const sigHelp = await send('textDocument/signatureHelp', {
+      textDocument: { uri: appUri },
+      position: posOf(appText, 'greet("App")', 'greet('.length + 1),
+    });
+    if (!sigHelp || !sigHelp.signatures || sigHelp.signatures.length === 0) {
+      throw new Error('signatureHelp returned no signatures for greet(');
+    }
+    const sigLabel = sigHelp.signatures[0].label;
+    if (!sigLabel.includes('name: String') || !sigLabel.includes('punctuation')) {
+      throw new Error('signatureHelp label missing parameters: ' + sigLabel);
+    }
+    console.log('[OK] signatureHelp ->', sigLabel);
+
+    // 5. documentSymbol hierarchy: Greeter has children render + target
+    const docSymbols = await send('textDocument/documentSymbol', { textDocument: { uri: coreUri } });
+    const flat = flattenSymbols(docSymbols).map((s) => s.name);
+    for (const expected of ['Screen', 'greet', 'Greeter', 'render', 'target']) {
+      if (!flat.includes(expected)) throw new Error(`documentSymbol missing ${expected} in ${flat}`);
+    }
+    const greeterSym = docSymbols.find((s) => s.name === 'Greeter');
+    if (!greeterSym || !(greeterSym.children || []).length) {
+      throw new Error('documentSymbol is not hierarchical (Greeter has no children)');
+    }
+    console.log('[OK] documentSymbol -> hierarchical ->', JSON.stringify(flat));
+
+    // 6. documentHighlight on greet in app file (import + call site)
+    const highlights = await send('textDocument/documentHighlight', {
+      textDocument: { uri: appUri },
+      position: posOf(appText, 'greet("App")', 2),
+    });
+    if (!highlights || highlights.length < 2) {
+      throw new Error('documentHighlight found < 2 occurrences: ' + JSON.stringify(highlights));
+    }
+    console.log('[OK] documentHighlight ->', highlights.length, 'occurrences');
+
+    // 7. implementation: Screen -> Greeter + App
+    const impls = await send('textDocument/implementation', {
+      textDocument: { uri: coreUri },
+      position: posOf(coreText, 'interface Screen', 'interface '.length + 1),
+    });
+    const implList = Array.isArray(impls) ? impls : [];
+    if (implList.length < 2) throw new Error('implementation(Screen) found < 2: ' + JSON.stringify(impls));
+    console.log('[OK] implementation(Screen) ->', implList.length, 'implementations');
+
+    // 8. typeDefinition: `screen: Screen` property -> Screen declaration
+    const typeDef = await send('textDocument/typeDefinition', {
+      textDocument: { uri: appUri },
+      position: posOf(appText, 'val screen: Screen', 'val screen'.length - 1),
+    });
+    const typeList = Array.isArray(typeDef) ? typeDef : [];
+    if (!typeList.some((d) => (d.uri || '').endsWith('Greeter.kt'))) {
+      throw new Error('typeDefinition(screen) did not resolve to Screen in Greeter.kt: ' + JSON.stringify(typeDef));
+    }
+    console.log('[OK] typeDefinition(screen) -> Screen');
+
+    // 9. prepareRename on greet call site
+    const prep = await send('textDocument/prepareRename', {
+      textDocument: { uri: appUri },
+      position: posOf(appText, 'greet("App")', 2),
+    });
+    if (!prep) throw new Error('prepareRename returned null');
+    console.log('[OK] prepareRename ->', JSON.stringify(prep));
+
+    // 10. references for greet (>= 3: core internal + app import + app call)
+    const refs = await send('textDocument/references', {
+      textDocument: { uri: coreUri },
+      position: posOf(coreText, 'greet(', 1),
+      context: { includeDeclaration: true },
+    });
+    if (!refs || refs.length < 3) throw new Error('references(greet) < 3: ' + JSON.stringify(refs));
+    console.log('[OK] references(greet) ->', refs.length, 'usages');
+
+    // 11. call hierarchy: prepare on greet, then incoming calls
+    const chPrep = await send('textDocument/prepareCallHierarchy', {
+      textDocument: { uri: coreUri },
+      position: posOf(coreText, 'greet(', 1),
+    });
+    if (!chPrep || chPrep.length === 0) throw new Error('prepareCallHierarchy(greet) empty');
+    const incoming = await send('callHierarchy/incomingCalls', { item: chPrep[0] });
+    if (!incoming || incoming.length < 2) {
+      throw new Error('incomingCalls(greet) < 2: ' + JSON.stringify(incoming));
+    }
+    console.log('[OK] callHierarchy incoming(greet) ->', incoming.length, 'callers');
+
+    // 12. type hierarchy: prepare on Screen, then subtypes
+    const thPrep = await send('textDocument/prepareTypeHierarchy', {
+      textDocument: { uri: coreUri },
+      position: posOf(coreText, 'interface Screen', 'interface '.length + 1),
+    });
+    if (!thPrep || thPrep.length === 0) throw new Error('prepareTypeHierarchy(Screen) empty');
+    const subtypes = await send('typeHierarchy/subtypes', { item: thPrep[0] });
+    if (!subtypes || subtypes.length < 2) {
+      throw new Error('typeHierarchy subtypes(Screen) < 2: ' + JSON.stringify(subtypes));
+    }
+    console.log('[OK] typeHierarchy subtypes(Screen) ->', subtypes.length);
+
+    // 13. codeLens: stored usages badges on core/Greeter.kt
+    const lenses = await send('textDocument/codeLens', { textDocument: { uri: coreUri } });
+    if (!lenses || lenses.length === 0) throw new Error('codeLens returned no lenses');
+    console.log('[OK] codeLens ->', lenses.length, 'lenses, e.g.', lenses[0].command && lenses[0].command.title);
+
+    // 14. inlay hints: parameter name hints in app/Main.kt (`greet("App")` -> `name:`)
+    const hints = await send('textDocument/inlayHint', {
+      textDocument: { uri: appUri },
+      range: { start: { line: 0, character: 0 }, end: { line: 999, character: 0 } },
+    });
+    const hintLabels = (hints || []).map((h) => h.label);
+    if (!hintLabels.some((l) => l === 'name:')) {
+      throw new Error('inlayHint missing `name:` hint: ' + JSON.stringify(hintLabels));
+    }
+    console.log('[OK] inlayHint ->', JSON.stringify(hintLabels));
+  }
+
+  // 15. workspace/symbol (empty query = all indexed symbols; proves cross-module indexing)
+  const wsSymbols = await send('workspace/symbol', { query: '' });
   const wsCount = Array.isArray(wsSymbols) ? wsSymbols.length : 0;
-  console.log('[OK] workspace/symbol(greet) ->', wsCount);
+  console.log('[OK] workspace/symbol(*) ->', wsCount);
+  if (wsCount === 0) {
+    throw new Error('workspace/symbol returned 0 results — cross-module index is empty');
+  }
 
-  // 7. shutdown + exit
+  if (hasFixtureFiles) {
+    // 15b. camelCase search: "Lh" -> LegacyHelper (Java file indexed)
+    const camel = await send('workspace/symbol', { query: 'Lh' });
+    const camelNames = (camel || []).map((s) => s.name);
+    if (!camelNames.includes('LegacyHelper')) {
+      throw new Error('camelCase search "Lh" did not find LegacyHelper: ' + JSON.stringify(camelNames));
+    }
+    console.log('[OK] workspace/symbol camelCase "Lh" -> LegacyHelper (Java)');
+  }
+
+  // 16. shutdown + exit
   await send('shutdown', null);
   sendNotify('exit', null);
   console.log('\n[OK] shutdown -> exit');
