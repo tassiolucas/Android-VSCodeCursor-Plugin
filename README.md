@@ -276,6 +276,7 @@ Settings disponíveis: `ase.server.javaPath`, `ase.indexing.generatedSources`, `
 
 - `docs/DEVELOPMENT_HISTORY.md` — histórico completo: decisões, bugs encontrados/corrigidos, comandos e resultados de cada fase
 - `docs/agent-handoffs/EXECUTION.md` — handoff técnico detalhado (Build → Reviewer) por fase
+- `docs/TESTING_GUIDE.md` — **roteiro de testes dos atalhos Android Studio** (checklist de validação manual, conflitos e troubleshooting)
 
 ---
 
