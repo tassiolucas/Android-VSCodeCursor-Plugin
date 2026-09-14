@@ -280,14 +280,15 @@ class ProjectIndexer(
             val text = file.readText()
             val maskedLines = com.androidstudioexperience.lsp.analysis.KotlinMask.maskLines(text)
 
-            // Ambiguity filter: only keep files that plausibly see THIS symbol
-            // (same package, explicit import, or fully-qualified usage).
+            // Ambiguity filter: only keep files that plausibly see THIS symbol.
+            // For members (containerName != null) the file must import the
+            // CONTAINER type — members are called on instances, not imported.
             if (ambiguous && symbol.packageName != null) {
                 val head = maskedLines.take(80)
                 val filePkg = head.firstNotNullOfOrNull {
                     Regex("""^\s*package\s+([\w.]+)""").find(it)?.groupValues?.get(1)
                 }
-                val fqn = "${symbol.packageName}.${symbol.name}"
+                val fqn = symbol.packageName + "." + (symbol.containerName ?: symbol.name)
                 val imported = head.any { line ->
                     val imp = Regex("""^\s*import\s+([\w.]+)""").find(line)?.groupValues?.get(1)
                     imp == fqn || imp == "${symbol.packageName}.*"

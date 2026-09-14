@@ -42,19 +42,42 @@ class RocksDbIndex private constructor(
             return try {
                 open(dbPath)
             } catch (e: RocksDBException) {
-                // Corruption (e.g. the process was SIGKILLed mid-write, leaving a
-                // dangling .sst). Recover by destroying and recreating an empty
-                // index — the project is then re-indexed from source.
                 if (isCorruption(e)) {
+                    // Corruption (e.g. the process was SIGKILLed mid-write, leaving a
+                    // dangling .sst). Recover by destroying and recreating an empty
+                    // index — the project is then re-indexed from source.
                     logger.warn("Corrupted index detected (${e.message}); recreating from scratch")
                     recover(dbPath)
                 } else {
-                    // Lock contention or other transient error: do NOT destroy,
-                    // another process may own the lock. Fail gracefully.
-                    logger.error("Failed to open RocksDB (${e.message})")
-                    null
+                    // Lock contention: another ASE server instance may hold the
+                    // lock (e.g. a second editor window, or a previous server
+                    // still shutting down). Retry with backoff before giving up.
+                    openWithLockRetry(dbPath, e)
                 }
             }
+        }
+
+        /** Retry opening when the DB lock is held by a transient process. */
+        private fun openWithLockRetry(dir: File, firstError: RocksDBException): RocksDbIndex? {
+            val attempts = 3
+            val waitMs = 2000L
+            repeat(attempts) { attempt ->
+                Thread.sleep(waitMs)
+                try {
+                    logger.info("Retrying RocksDB open after lock contention (attempt ${attempt + 2}/${attempts + 1})")
+                    return open(dir)
+                } catch (e: RocksDBException) {
+                    if (isCorruption(e)) return recover(dir)
+                    logger.warn("RocksDB still locked: ${e.message}")
+                }
+            }
+            // Another live process owns the index: run without persistence
+            // (in-file features still work; cross-file falls back gracefully).
+            logger.error(
+                "Failed to open RocksDB after ${attempts + 1} attempts (${firstError.message}). " +
+                    "Another ASE instance likely has this workspace open."
+            )
+            return null
         }
 
         private fun open(dir: File): RocksDbIndex {
