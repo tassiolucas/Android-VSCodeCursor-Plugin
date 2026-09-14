@@ -58,6 +58,12 @@ class AndroidLspServer : LanguageServer, LanguageClientAware {
                 indexManager = IndexManager.create(rootPath, includeGeneratedSources)
                 if (indexManager != null) {
                     logger.info("Index manager initialized for $rootPath")
+                    if (indexManager!!.isTemporaryIndex) {
+                        client?.showMessage(org.eclipse.lsp4j.MessageParams(
+                            org.eclipse.lsp4j.MessageType.Warning,
+                            "ASE: index is locked by another editor instance — using a temporary in-session index (not persisted)"
+                        ))
+                    }
                     // Start background indexing
                     CompletableFuture.runAsync {
                         try {
@@ -72,10 +78,19 @@ class AndroidLspServer : LanguageServer, LanguageClientAware {
                             }
                         } catch (e: Exception) {
                             logger.error("Indexing failed: ${e.message}", e)
+                            // Visible failure: silent broken indexes are the worst UX.
+                            client?.showMessage(org.eclipse.lsp4j.MessageParams(
+                                org.eclipse.lsp4j.MessageType.Error,
+                                "ASE: indexing failed (${e.message}) — see Output > ASE LSP"
+                            ))
                         }
                     }
                 } else {
                     logger.warn("Failed to initialize index manager (RocksDB native lib issue?)")
+                    client?.showMessage(org.eclipse.lsp4j.MessageParams(
+                        org.eclipse.lsp4j.MessageType.Error,
+                        "ASE: failed to open the symbol index — see Output > ASE LSP"
+                    ))
                 }
             }
         }

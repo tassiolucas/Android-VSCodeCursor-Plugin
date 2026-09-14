@@ -145,7 +145,7 @@ npm run compile          # tsc -p ./
 
 ```bash
 # Na raiz do repositório:
-npm run build:server     # = gradle -p server installDist
+npm run build:server     # gradle do sistema OU wrapper commitado (scripts/build-server.js)
 
 # Ou sem Gradle instalado, usando o wrapper (commitado no repo):
 cd server
@@ -162,8 +162,10 @@ Gera o launcher em `server/build/install/ase-lsp-server/bin/`:
 ### 4. Build completo
 
 ```bash
-npm run build:all        # npm run compile && npm run build:server
+npm run build:all        # compile + build:server + bundle:server
 ```
+
+> `bundle:server` copia o build fresco para `server/{bin,lib}` — é esse par que o `vsce package` empacota (`server/build/` é ignorado). O `vscode:prepublish` já roda tudo automaticamente ao empacotar, então o `.vsix` sempre carrega o servidor atual.
 
 ### 5. Rodar no VS Code (F5)
 

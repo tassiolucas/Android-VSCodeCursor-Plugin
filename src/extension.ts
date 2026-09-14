@@ -47,13 +47,15 @@ class AseLibContentProvider implements vscode.TextDocumentContentProvider {
 /**
  * Locates the ASE LSP server launcher.
  *
- * During development: server/build/install/ase-lsp-server/bin/ase-lsp-server.bat
- * In a packaged extension: bundled under ./server/bin
+ * Development (repo): server/build/install/... is PREFERRED (fresh build) —
+ * server/bin is only a stale copy bundled for packaging and must not win here.
+ * Packaged extension: only ./server/bin exists (server/build is .vscodeignore'd).
  */
 function findServerLauncher(context: vscode.ExtensionContext): string | undefined {
+    const launcherName = process.platform === 'win32' ? 'ase-lsp-server.bat' : 'ase-lsp-server';
     const candidates = [
-        path.join(context.extensionPath, 'server', 'bin', process.platform === 'win32' ? 'ase-lsp-server.bat' : 'ase-lsp-server'),
-        path.join(context.extensionPath, 'server', 'build', 'install', 'ase-lsp-server', 'bin', process.platform === 'win32' ? 'ase-lsp-server.bat' : 'ase-lsp-server'),
+        path.join(context.extensionPath, 'server', 'build', 'install', 'ase-lsp-server', 'bin', launcherName),
+        path.join(context.extensionPath, 'server', 'bin', launcherName),
     ];
     for (const c of candidates) {
         if (require('fs').existsSync(c)) return c;

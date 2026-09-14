@@ -619,6 +619,56 @@ Auditoria do escopo "indexação, navegação e leitura de funções/classes/obj
 
 ---
 
+## 16. Fase 3.5 (cont.) — Bugs encontrados no teste visual (2026-09-14)
+
+Primeira rodada de testes visuais no VS Code real (projeto Fruitties) revelou uma cascata de falhas. Diagnóstico e correções:
+
+### 16.1 O bug-mãe: `.vsix` empacotava jar defasado
+
+`findServerLauncher()` preferia `server/bin` (cópia manual de uma sessão antiga, 129 KB) sobre `server/build/install` (build fresco, 239 KB). O `.vscodeignore` exclui `server/build/` do pacote → **o `.vsix` e o dev-host (F5) rodavam o servidor da Fase 3, sem nada da Fase 3.5**. Sintomas no usuário: camelCase sem match, Alt+F7 vazio, Ctrl+P mudo, Shift+F6 mudo — tudo "índice/comportamento de código velho".
+
+Correções estruturais:
+- `scripts/bundle-server.js` (novo): copia `server/build/install/{bin,lib}` → `server/{bin,lib}` em todo package.
+- `vscode:prepublish` agora: `compile && build:server && bundle:server` — impossível empacotar jar velho.
+- `scripts/build-server.js` (novo): tenta `gradle` do sistema, cai no wrapper commitado (`server/gradlew`).
+- `findServerLauncher` inverteu a preferência: `build/install` (dev) primeiro, `server/bin` (packaged) depois.
+- Verificação pós-package: md5 do jar dentro do `.vsix` == md5 do build (automatizado no handoff).
+
+### 16.2 IDs de comando errados (fonte do VS Code consultada)
+
+| Eu usava (errado) | Correto |
+|---|---|
+| `editor.action.showTypeHierarchy` | `editor.showTypeHierarchy` |
+| `editor.action.showCallHierarchy` | `editor.showCallHierarchy` |
+
+`editor.action.referenceSearch.trigger` (Alt+F7) confirmado correto.
+
+### 16.3 Conflito Ctrl+Alt+B com a barra auxiliar
+
+`ctrl+alt+b` no Linux é `workbench.action.toggleAuxiliaryBar` (sidebar secundária — onde o Copilot Chat mora). Resolvido com override no `~/.config/Code/User/keybindings.json` (regra de usuário vence default/extensão) redirecionando para `goToImplementation` em editores Kotlin/Java.
+
+### 16.4 Ctrl+T filtra no cliente
+
+O picker de workspace symbols do VS Code re-pontua os resultados do servidor com `scoreFuzzy2` no label (verificado no fonte `symbolsQuickAccess.ts`). Com o jar correto, o camelCase do servidor passa pelo filtro (subsequência case-aware bate). Validado no cliente real via `executeWorkspaceSymbolProvider`.
+
+### 16.5 Resiliência do servidor
+
+- Falha de indexação → `showMessage(Error)` visível (antes: só log).
+- Lock do RocksDB persistente (outra janela no mesmo workspace) → retry 3×2s, e se persistir, **índice temporário por processo** (features completas, sem persistência) + warning ao usuário — em vez de rodar sem índice.
+- Toast de "Indexed N symbols" passa a ser prova de indexação saudável (ausência = falha visível).
+
+### 16.6 Bug cosmético: assinatura mascarada
+
+O parser montava a `signature` a partir do texto **mascarado** → defaults/strings apareciam em branco (`punctuation: String = " "` em vez de `"!"`, `@SerialName(" ")`). Fix: `signatureFrom()` corta o header **original** nos índices calculados sobre o mascarado (o `KotlinMask` preserva colunas 1:1).
+
+### 16.7 Teste de integração no cliente real
+
+`npm run test:integration` (test-electron, janela real) estendido com a suíte "ASE Navigation Parity (fixture)": signatureHelp, definition cross-module, `R.string`→XML, implementations, typeDefinition, references em classe, workspace symbol camelCase, documentSymbol hierárquico. **3 passing** (lib-decompile faz skip consciente no fixture sem deps).
+
+Resultado final: 37 unit + 20 smoke stdio + 16 validação real (cópia do Fruitties com `build/`) + 3 integração VS Code — tudo verde.
+
+---
+
 ## Apêndice A — Arquivos-fonte principais (mapa rápido)
 
 | Arquivo | Responsabilidade |

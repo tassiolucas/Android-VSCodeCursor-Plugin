@@ -16,6 +16,10 @@ class IndexManager private constructor(
 ) {
     private val logger = LoggerFactory.getLogger(javaClass)
 
+    /** True when the real index is locked by another instance and we live in a temp dir. */
+    val isTemporaryIndex: Boolean
+        get() = index.temporaryFallback
+
     // Cache for quick symbol lookup by file
     private val fileSymbols = ConcurrentHashMap<String, List<SymbolInfo>>()
 

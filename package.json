@@ -140,13 +140,13 @@
         "when": "editorTextFocus && (editorLangId == kotlin || editorLangId == java)"
       },
       {
-        "command": "editor.action.showTypeHierarchy",
+        "command": "editor.showTypeHierarchy",
         "key": "ctrl+h",
         "mac": "ctrl+h",
         "when": "editorTextFocus && (editorLangId == kotlin || editorLangId == java)"
       },
       {
-        "command": "editor.action.showCallHierarchy",
+        "command": "editor.showCallHierarchy",
         "key": "ctrl+alt+h",
         "mac": "ctrl+alt+h",
         "when": "editorTextFocus && (editorLangId == kotlin || editorLangId == java)"
@@ -175,11 +175,12 @@
     }
   },
   "scripts": {
-    "vscode:prepublish": "npm run compile",
+    "vscode:prepublish": "npm run compile && npm run build:server && npm run bundle:server",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "build:server": "gradle -p server installDist",
-    "build:all": "npm run compile && npm run build:server",
+    "build:server": "node scripts/build-server.js",
+    "bundle:server": "node scripts/bundle-server.js",
+    "build:all": "npm run compile && npm run build:server && npm run bundle:server",
     "test:lsp": "node scripts/test-lsp.js",
     "test:libraries": "node scripts/test-libraries.js",
     "test:navigation": "node scripts/verify-navigation.js",

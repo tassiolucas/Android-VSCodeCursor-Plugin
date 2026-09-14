@@ -82,7 +82,6 @@ suite('ASE Extension Integration (Real Project)', () => {
 
         await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
     });
-
     test('go-to-definition into external library opens decompiled document', async function () {
         this.timeout(240000);
 
@@ -90,12 +89,15 @@ suite('ASE Extension Integration (Real Project)', () => {
         await ext!.activate();
 
         const root = vscode.workspace.workspaceFolders![0]!.uri.fsPath;
+        if (root.endsWith('test-workspace')) {
+            // The fixture has no external dependencies; library navigation is
+            // covered by scripts/test-libraries.js against a real project.
+            console.log('SKIP: fixture workspace has no external libs');
+            return;
+        }
         const usage = findLibraryUsage(root);
         if (!usage) {
-            // The built-in fixture has no external dependencies; library
-            // navigation is covered by scripts/test-libraries.js against a
-            // real project (ASE_TEST_WORKSPACE).
-            console.log('SKIP: no external library usage found under workspace (fixture has no deps)');
+            console.log('SKIP: no external library usage found under workspace');
             return;
         }
 
@@ -170,3 +172,129 @@ function walkKtFiles(root: string): string[] {
     }
     return files;
 }
+
+/**
+ * End-to-end navigation parity checks against the built-in test-workspace
+ * fixture (2 modules: app + core, Kotlin + Java + res). Runs only when the
+ * workspace under test is the fixture (it has the required structure).
+ */
+suite('ASE Navigation Parity (fixture)', () => {
+    const fixtureRoot = path.resolve(__dirname, '..', '..', '..', 'test-workspace');
+    const coreFile = path.join(fixtureRoot, 'core/src/main/kotlin/com/example/core/Greeter.kt');
+    const appFile = path.join(fixtureRoot, 'app/src/main/kotlin/com/example/app/Main.kt');
+
+    function posOf(text: string, needle: string, off = 0): vscode.Position {
+        const idx = text.indexOf(needle);
+        assert.ok(idx >= 0, `needle not found: ${needle}`);
+        const upto = text.slice(0, idx + off);
+        const lines = upto.split('\n');
+        return new vscode.Position(lines.length - 1, lines[lines.length - 1].length);
+    }
+
+    async function openAndWait(file: string): Promise<vscode.TextDocument> {
+        const doc = await vscode.workspace.openTextDocument(file);
+        await vscode.window.showTextDocument(doc);
+        return doc;
+    }
+
+    async function waitForIndex(): Promise<void> {
+        for (let i = 0; i < 40; i++) {
+            const syms = await vscode.commands.executeCommand<vscode.SymbolInformation[]>(
+                'vscode.executeWorkspaceSymbolProvider', ''
+            );
+            if ((syms ?? []).length > 0) return;
+            await new Promise((r) => setTimeout(r, 1500));
+        }
+        assert.fail('index never became non-empty');
+    }
+
+    test('full navigation feature set works in the real client', async function () {
+        this.timeout(240000);
+
+        if (!vscode.workspace.workspaceFolders?.[0]?.uri.fsPath.endsWith('test-workspace')) {
+            this.skip();
+        }
+
+        const ext = vscode.extensions.getExtension('ase-dev.android-studio-experience');
+        await ext!.activate();
+
+        await waitForIndex();
+        const appDoc = await openAndWait(appFile);
+        const coreDoc = await openAndWait(coreFile);
+        const appText = appDoc.getText();
+        const coreText = coreDoc.getText();
+        await new Promise((r) => setTimeout(r, 1500));
+
+        // 1. Signature help (Ctrl+P equivalent) inside greet("App")
+        const sigHelp = await vscode.commands.executeCommand<vscode.SignatureHelp>(
+            'vscode.executeSignatureHelpProvider',
+            appDoc.uri,
+            posOf(appText, 'greet("App")', 'greet('.length + 1)
+        );
+        assert.ok(sigHelp && sigHelp.signatures.length > 0, 'signatureHelp should return signatures');
+        assert.ok(
+            sigHelp!.signatures[0]!.label.includes('name: String'),
+            'signature should include parameters: ' + sigHelp!.signatures[0]!.label
+        );
+
+        // 2. Cross-module definition: greet in app -> core/Greeter.kt
+        const defs = await vscode.commands.executeCommand<vscode.Location[]>(
+            'vscode.executeDefinitionProvider',
+            appDoc.uri,
+            posOf(appText, 'greet("App")', 2)
+        );
+        assert.ok((defs ?? []).some((l) => l.uri.fsPath.endsWith('Greeter.kt')),
+            'greet should resolve cross-module to Greeter.kt');
+
+        // 3. Resource navigation: R.string.app_name -> strings.xml
+        const resDefs = await vscode.commands.executeCommand<vscode.Location[]>(
+            'vscode.executeDefinitionProvider',
+            appDoc.uri,
+            posOf(appText, 'app_name', 2)
+        );
+        assert.ok((resDefs ?? []).some((l) => l.uri.fsPath.endsWith('strings.xml')),
+            'R.string.app_name should resolve to strings.xml');
+
+        // 4. Implementations of Screen -> Greeter + App
+        const impls = await vscode.commands.executeCommand<vscode.Location[]>(
+            'vscode.executeImplementationProvider',
+            coreDoc.uri,
+            posOf(coreText, 'interface Screen', 'interface '.length + 1)
+        );
+        assert.ok((impls ?? []).length >= 2, 'Screen should have >= 2 implementations, got ' + (impls ?? []).length);
+
+        // 5. Type definition: screen: Screen -> Screen
+        const typeDefs = await vscode.commands.executeCommand<vscode.Location[]>(
+            'vscode.executeTypeDefinitionProvider',
+            appDoc.uri,
+            posOf(appText, 'val screen: Screen', 'val screen'.length - 1)
+        );
+        assert.ok((typeDefs ?? []).some((l) => l.uri.fsPath.endsWith('Greeter.kt')),
+            'type of screen should resolve to Screen in Greeter.kt');
+
+        // 6. References on a CLASS (DataRepository regression: class-name usages)
+        const classRefs = await vscode.commands.executeCommand<vscode.Location[]>(
+            'vscode.executeReferenceProvider',
+            coreDoc.uri,
+            posOf(coreText, 'class Greeter', 'class '.length + 1)
+        );
+        assert.ok((classRefs ?? []).length >= 2, 'Greeter should have usages (app module), got ' + (classRefs ?? []).length);
+
+        // 7. Workspace symbol camelCase: "Lh" -> LegacyHelper (Java file)
+        const camel = await vscode.commands.executeCommand<vscode.SymbolInformation[]>(
+            'vscode.executeWorkspaceSymbolProvider', 'Lh'
+        );
+        const camelNames = (camel ?? []).map((s) => s.name);
+        assert.ok(camelNames.includes('LegacyHelper'),
+            'camelCase "Lh" should find LegacyHelper, got ' + JSON.stringify(camelNames));
+
+        // 8. Document symbols are hierarchical (Greeter has children)
+        const docSymbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[]>(
+            'vscode.executeDocumentSymbolProvider', coreDoc.uri
+        );
+        const greeter = (docSymbols ?? []).find((s) => s.name === 'Greeter');
+        assert.ok(greeter && greeter.children.length > 0, 'documentSymbol should be hierarchical');
+
+        await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+    });
+});

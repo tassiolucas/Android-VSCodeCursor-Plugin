@@ -435,12 +435,13 @@ private class Parser(text: String) {
             val m = Regex("""fun interface\s+(\w+)""").find(trimmed) ?: return null
             val headerEnd = assembleHeaderEnd(lineIdx, trimmed)
             val header = headerText(lineIdx, headerEnd)
+            val headerOrig = headerTextOriginal(lineIdx, headerEnd)
             val node = Node(
                 name = m.groupValues[1],
                 nameCol = indent + m.groups[1]!!.range.first,
                 kind = SymbolKind.Interface,
                 startLine = lineIdx, headerEndLine = headerEnd,
-                signature = cutTopLevel(header, '{').trim(),
+                signature = signatureFrom(header, headerOrig, '{'),
                 doc = doc, visibility = visibilityOf(trimmed),
                 parameters = emptyList(), returnType = null, superTypes = emptyList(),
                 parent = parent,
@@ -452,13 +453,14 @@ private class Parser(text: String) {
         if (funMatch != null) {
             val headerEnd = assembleHeaderEnd(lineIdx, trimmed)
             val header = headerText(lineIdx, headerEnd)
+            val headerOrig = headerTextOriginal(lineIdx, headerEnd)
             val parenBlock = extractParenBlock(header)
             val node = Node(
                 name = funMatch.groupValues[1],
                 nameCol = indent + funMatch.groups[1]!!.range.first,
                 kind = SymbolKind.Function,
                 startLine = lineIdx, headerEndLine = headerEnd,
-                signature = cutTopLevel(cutTopLevel(header, '{'), '=').trim(),
+                signature = signatureFrom(header, headerOrig, '{', '='),
                 doc = doc, visibility = visibilityOf(trimmed),
                 parameters = parenBlock?.let { parseParams(it).map { p -> p.param } } ?: emptyList(),
                 returnType = returnTypeOf(header),
@@ -479,6 +481,7 @@ private class Parser(text: String) {
             }
             val headerEnd = assembleHeaderEnd(lineIdx, trimmed)
             val header = headerText(lineIdx, headerEnd)
+            val headerOrig = headerTextOriginal(lineIdx, headerEnd)
             val kind = when {
                 Regex("""\benum\s+class\b""").containsMatchIn(header) -> SymbolKind.Enum
                 classLike.groupValues[1] == "interface" -> SymbolKind.Interface
@@ -490,7 +493,7 @@ private class Parser(text: String) {
                 nameCol = nameCol,
                 kind = kind,
                 startLine = lineIdx, headerEndLine = headerEnd,
-                signature = cutTopLevel(header, '{').trim().removeSuffix(":").trim(),
+                signature = signatureFrom(header, headerOrig, '{').removeSuffix(":").trim(),
                 doc = doc, visibility = visibilityOf(trimmed),
                 parameters = extractParenBlock(header)?.let { parseParams(it).map { p -> p.param } } ?: emptyList(),
                 returnType = null,
@@ -523,18 +526,18 @@ private class Parser(text: String) {
         val aliasMatch = TYPEALIAS.find(trimmed)
         if (aliasMatch != null) {
             val headerEnd = assembleHeaderEnd(lineIdx, trimmed)
-            val header = headerText(lineIdx, headerEnd)
+            val headerOrig = headerTextOriginal(lineIdx, headerEnd)
             val node = Node(
                 name = aliasMatch.groupValues[1],
                 nameCol = indent + aliasMatch.groups[1]!!.range.first,
                 kind = SymbolKind.Class,
                 startLine = lineIdx, headerEndLine = headerEnd,
-                signature = header.trim(),
+                signature = headerOrig,
                 doc = doc, visibility = visibilityOf(trimmed),
                 parameters = emptyList(), returnType = null, superTypes = emptyList(),
                 parent = parent,
             )
-            return finish(node, headerEnd, header)
+            return finish(node, headerEnd, headerText(lineIdx, headerEnd))
         }
 
         // Secondary constructor (only meaningful inside a class body).
@@ -542,12 +545,13 @@ private class Parser(text: String) {
         if (ctor != null && parent != null && parent.kind in CLASS_LIKE_KINDS) {
             val headerEnd = assembleHeaderEnd(lineIdx, trimmed)
             val header = headerText(lineIdx, headerEnd)
+            val headerOrig = headerTextOriginal(lineIdx, headerEnd)
             val node = Node(
                 name = parent.name,
                 nameCol = indent + ctor.range.first,
                 kind = SymbolKind.Constructor,
                 startLine = lineIdx, headerEndLine = headerEnd,
-                signature = cutTopLevel(header, '{').trim(),
+                signature = signatureFrom(header, headerOrig, '{'),
                 doc = doc, visibility = visibilityOf(trimmed),
                 parameters = extractParenBlock(header)?.let { parseParams(it).map { p -> p.param } } ?: emptyList(),
                 returnType = null, superTypes = emptyList(),
@@ -563,12 +567,13 @@ private class Parser(text: String) {
             if (parent != null && !inClassBody) return null // local inside function: skip
             val headerEnd = assembleHeaderEnd(lineIdx, trimmed)
             val header = headerText(lineIdx, headerEnd)
+            val headerOrig = headerTextOriginal(lineIdx, headerEnd)
             val node = Node(
                 name = valVar.groupValues[1],
                 nameCol = indent + valVar.groups[1]!!.range.first,
                 kind = SymbolKind.Property,
                 startLine = lineIdx, headerEndLine = headerEnd,
-                signature = cutTopLevel(cutTopLevel(header, '='), '{').trim()
+                signature = signatureFrom(header, headerOrig, '=', '{')
                     .replace(Regex("""\s+by$"""), "").trim(),
                 doc = doc, visibility = visibilityOf(trimmed),
                 parameters = emptyList(),
@@ -615,11 +620,48 @@ private class Parser(text: String) {
 
     private fun headerText(startLine: Int, endLine: Int): String {
         if (startLine == endLine) return maskedLines[startLine].trim()
-        val sb = StringBuilder()
-        for (i in startLine..endLine) {
-            sb.append(maskedLines[i].trim()).append(' ')
+        return (startLine..endLine).joinToString(" ") { maskedLines[it].trim() }.trim()
+    }
+
+    /**
+     * Same assembly as [headerText] but over ORIGINAL lines — same length,
+     * same columns (the mask preserves positions), so a cut index computed on
+     * the masked header maps 1:1 to the original. Used for display signatures
+     * (strings/defaults must show real text, not masked blanks).
+     */
+    private fun headerTextOriginal(startLine: Int, endLine: Int): String {
+        if (startLine == endLine) return originalLines[startLine].trim()
+        return (startLine..endLine).joinToString(" ") { originalLines[it].trim() }.trim()
+    }
+
+    /** Index of the first top-level (paren/angle depth 0) occurrence of [cut], or -1. */
+    private fun topLevelIndexOf(header: String, cut: Char): Int {
+        var paren = 0
+        var angle = 0
+        for (i in header.indices) {
+            when (header[i]) {
+                '(' -> paren++
+                ')' -> paren--
+                '<' -> angle++
+                '>' -> if (angle > 0) angle--
+                else -> if (header[i] == cut && paren == 0 && angle == 0) return i
+            }
         }
-        return sb.toString().trim().replace(Regex("\\s+"), " ")
+        return -1
+    }
+
+    /**
+     * Display signature: cut the ORIGINAL header at the earliest top-level
+     * occurrence of [cuts] found in the MASKED header (so braces/equals inside
+     * string literals don't cut, but their text survives in the output).
+     */
+    private fun signatureFrom(headerMasked: String, headerOrig: String, vararg cuts: Char): String {
+        var idx = headerMasked.length
+        for (c in cuts) {
+            val i = topLevelIndexOf(headerMasked, c)
+            if (i >= 0 && i < idx) idx = i
+        }
+        return headerOrig.substring(0, minOf(idx, headerOrig.length)).trim()
     }
 
     /** Cuts [header] at the first top-level (paren/angle depth 0) occurrence of [cut]. */
@@ -802,7 +844,7 @@ private class Parser(text: String) {
                 Node(
                     name = name, nameCol = col, kind = SymbolKind.EnumMember,
                     startLine = lineIdx, headerEndLine = lineIdx,
-                    signature = p, doc = null, visibility = null,
+                    signature = name, doc = null, visibility = null,
                     parameters = emptyList(), returnType = null, superTypes = emptyList(),
                     parent = enumNode,
                 )

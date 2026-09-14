@@ -16,9 +16,14 @@ import java.io.File
  * - "meta:{key}" -> value
  */
 class RocksDbIndex private constructor(
-    private val db: RocksDB
+    private val db: RocksDB,
+    private val dbDir: File,
 ) {
     private val logger = LoggerFactory.getLogger(javaClass)
+
+    /** True when this index lives in a temp dir because the real one is locked. */
+    var temporaryFallback: Boolean = false
+        private set
 
     companion object {
         private val logger = LoggerFactory.getLogger(RocksDbIndex::class.java)
@@ -71,19 +76,26 @@ class RocksDbIndex private constructor(
                     logger.warn("RocksDB still locked: ${e.message}")
                 }
             }
-            // Another live process owns the index: run without persistence
-            // (in-file features still work; cross-file falls back gracefully).
-            logger.error(
-                "Failed to open RocksDB after ${attempts + 1} attempts (${firstError.message}). " +
-                    "Another ASE instance likely has this workspace open."
-            )
-            return null
+            // Another live process owns the index (e.g. a second editor window on
+            // the same workspace): fall back to a TEMPORARY index so every feature
+            // keeps working this session — just without persistence.
+            return try {
+                val tmp = java.nio.file.Files.createTempDirectory("ase-index-locked-").toFile()
+                logger.warn(
+                    "Index locked by another instance; using temporary in-session index " +
+                        "at ${tmp.absolutePath} (not persisted)"
+                )
+                open(tmp)?.also { it.temporaryFallback = true }
+            } catch (e: Exception) {
+                logger.error("Failed to open fallback index: ${e.message}")
+                null
+            }
         }
 
         private fun open(dir: File): RocksDbIndex {
             val db = RocksDB.open(Options().setCreateIfMissing(true), dir.absolutePath)
             logger.info("Opened RocksDB at ${dir.absolutePath}")
-            return RocksDbIndex(db)
+            return RocksDbIndex(db, dir)
         }
 
         private fun isCorruption(e: RocksDBException): Boolean {
@@ -548,6 +560,13 @@ class RocksDbIndex private constructor(
             db.close()
         } catch (e: Exception) {
             logger.error("Error closing RocksDB: ${e.message}")
+        }
+        if (temporaryFallback) {
+            try {
+                dbDir.deleteRecursively()
+            } catch (e: Exception) {
+                logger.debug("Failed to delete temp index ${dbDir.absolutePath}: ${e.message}")
+            }
         }
     }
 
