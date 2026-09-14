@@ -2,7 +2,7 @@
   "name": "android-studio-experience",
   "displayName": "Android Studio Experience",
   "description": "Custom Android/Kotlin IDE experience for Cursor/VSCode: own LSP engine, Compose & XML previews, run/debug pipeline, IntelliJ-like Git workflow.",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "publisher": "ase-dev",
   "license": "Apache-2.0",
   "engines": {

@@ -701,3 +701,12 @@ Resultado final: 37 unit + 20 smoke stdio + 16 validação real (cópia do Fruit
 | `vscode-languageclient` | 9.0.1 | Client LSP no VS Code |
 | `@vscode/test-electron` | 3.1.0 | Testes de integração |
 | `typescript` | 5.4+ | Compilação do client |
+---
+
+## 17. Release v0.1.0 — plugin instalável (2026-09-14)
+
+- Bump de versão `0.0.1` → `0.1.0` (package.json + server/build.gradle.kts).
+- `.vsix` empacotado com `vscode:prepublish` (compile + build:server + bundle:server), com verificação de md5 do jar interno == build.
+- Distribuição: GitHub Release `v0.1.0` com o `.vsix` anexado (download direto para outras máquinas).
+- Pré-requisitos da máquina de destino: JDK 21 (obrigatório), Android SDK (só para libs externas), VS Code/Cursor 1.85+.
+- `rocksdbjni` embute binários nativos dos 3 SOs → o mesmo `.vsix` serve Linux/Windows/macOS.
