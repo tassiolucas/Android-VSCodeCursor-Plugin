@@ -7,22 +7,8 @@ out/
 # VS Code test artifacts
 .vscode-test/
 
-# Gradle / Kotlin build
-server/build/
-server/.gradle/
-
-# Packaged server bundle for VSIX
-server/bin/
-server/lib/
-
 # VS Code extension packaging
 *.vsix
-
-# ASE runtime index (created in workspace root at runtime)
-.ase-index/
-
-# Logs
-*.log
 
 # OS
 .DS_Store

@@ -1,204 +1,193 @@
 {
   "name": "android-studio-experience",
   "displayName": "Android Studio Experience",
-  "description": "Custom Android/Kotlin IDE experience for Cursor/VSCode: own LSP engine, Compose & XML previews, run/debug pipeline, IntelliJ-like Git workflow.",
-  "version": "0.1.0",
+  "description": "Android Studio workflow for VS Code / Cursor (module selection, Android project tree, build variants, run, logcat, debug, preview and keymap) on top of JetBrains Kotlin LSP, which owns Gradle sync and code analysis.",
+  "version": "0.4.0",
   "publisher": "ase-dev",
   "license": "Apache-2.0",
-  "engines": {
-    "vscode": "^1.85.0"
-  },
-  "categories": [
-    "Programming Languages",
-    "Debuggers",
-    "Other"
-  ],
+  "engines": { "vscode": "^1.85.0" },
+  "categories": ["Keymaps", "Other"],
+  "extensionDependencies": ["JetBrains.kotlin-server"],
   "activationEvents": [
-    "onStartupFinished",
     "onLanguage:kotlin",
     "onLanguage:java",
-    "onLanguage:xml",
-    "workspaceContains:**/build.gradle.kts",
-    "workspaceContains:**/build.gradle",
-    "workspaceContains:settings.gradle",
-    "workspaceContains:settings.gradle.kts"
+    "workspaceContains:settings.gradle.kts",
+    "workspaceContains:settings.gradle"
   ],
   "main": "./out/extension.js",
   "contributes": {
-    "languages": [
-      {
-        "id": "kotlin",
-        "aliases": [
-          "Kotlin",
-          "kotlin"
-        ],
-        "extensions": [
-          ".kt",
-          ".kts"
-        ],
-        "configuration": "./language-configuration.json"
-      }
-    ],
-    "configurationDefaults": {
-      "[kotlin]": {
-        "editor.semanticHighlighting.enabled": true
-      }
-    },
     "configuration": {
       "title": "Android Studio Experience",
       "properties": {
-        "ase.renderer.timeoutSeconds": {
-          "type": "number",
-          "default": 300,
-          "description": "How long the preview renderer daemon stays alive after the last request before shutting down."
-        },
-        "ase.server.javaPath": {
-          "type": "string",
-          "default": "",
-          "description": "Path to the Java executable used to launch the LSP server. Empty = use JAVA_HOME / PATH."
-        },
-        "ase.indexing.generatedSources": {
+        "ase.autoReload": {
           "type": "boolean",
           "default": true,
-          "description": "Index KSP/KAPT generated sources found under build/generated/."
+          "description": "Ask kotlin-lsp to reload the Gradle project when the module flags file, *.gradle.kts or libs.versions.toml change."
         },
-        "ase.sdk.minApi": {
+        "ase.profile.moduleFlagsFile": {
+          "type": "string",
+          "default": "local.properties",
+          "markdownDescription": "File (relative to the workspace root) holding module flags in the `group.path/to/module=true|false|auto` format."
+        },
+        "ase.profile.defaultFlagsFile": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Optional defaults file with the same flag format. Used only when `moduleFlagsFile` has no valid flag."
+        },
+        "ase.profile.alwaysIncluded": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "default": {},
+          "markdownDescription": "Modules always included by the Gradle settings, as `{ \":gradle:path\": \"relative/dir\" }`."
+        },
+        "ase.profile.appModules": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "markdownDescription": "Application modules available to Run/Debug/Preview (e.g. `[\":app\"]`). The first one is the default."
+        },
+        "ase.profile.variants": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["debug"],
+          "markdownDescription": "Build variants offered by the variant selector (e.g. `[\"debug\", \"freeDebug\"]`). The first one is the default."
+        },
+        "ase.adb.path": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Path to `adb`. Empty = `$ANDROID_HOME/platform-tools/adb`, then `sdk.dir` from `local.properties`, then `adb` on PATH."
+        },
+        "ase.debug.port": {
           "type": "number",
-          "default": 21,
-          "description": "Minimum supported Android API level (baseline used for preview rendering)."
+          "default": 8700,
+          "description": "Local TCP port forwarded to the app JDWP socket when attaching the debugger."
         }
       }
     },
+    "viewsContainers": {
+      "activitybar": [
+        { "id": "ase", "title": "Android", "icon": "$(device-mobile)" }
+      ]
+    },
+    "views": {
+      "ase": [
+        { "id": "ase.androidProject", "name": "Project" }
+      ]
+    },
     "commands": [
-      {
-        "command": "ase.indexProject",
-        "title": "ASE: Index Project",
-        "category": "Android Studio Experience"
-      },
-      {
-        "command": "ase.renderComposePreview",
-        "title": "ASE: Render Compose Preview",
-        "category": "Android Studio Experience"
-      },
-      {
-        "command": "ase.renderLayoutPreview",
-        "title": "ASE: Render Layout Preview",
-        "category": "Android Studio Experience"
-      },
-      {
-        "command": "ase.showReferences",
-        "title": "ASE: Show References",
-        "category": "Android Studio Experience"
-      }
+      { "command": "ase.reloadProject",       "title": "Reload Gradle Project (kotlin-lsp)", "category": "ASE", "icon": "$(sync)" },
+      { "command": "ase.lspDiagnostics",      "title": "kotlin-lsp Diagnostics",            "category": "ASE" },
+      { "command": "ase.openKotlinLspIssues", "title": "Report Issue to kotlin-lsp",        "category": "ASE" },
+      { "command": "ase.selectModules",       "title": "Select Modules",                    "category": "ASE", "icon": "$(checklist)" },
+      { "command": "ase.refreshTree",         "title": "Refresh Android Project",           "category": "ASE", "icon": "$(refresh)" },
+      { "command": "ase.selectVariant",       "title": "Select Build Variant",              "category": "ASE" },
+      { "command": "ase.selectAppModule",     "title": "Select App Module",                 "category": "ASE" },
+      { "command": "ase.assemble",            "title": "Build (assemble selected variant)", "category": "ASE" },
+      { "command": "ase.selectDevice",        "title": "Select Device",                     "category": "ASE" },
+      { "command": "ase.runApp",              "title": "Run App",                           "category": "ASE", "icon": "$(play)" },
+      { "command": "ase.logcat",              "title": "Show Logcat",                       "category": "ASE" },
+      { "command": "ase.debugApp",            "title": "Debug App (attach)",                "category": "ASE", "icon": "$(debug-alt)" },
+      { "command": "ase.runComposePreview",   "title": "Run Compose Preview on Device",     "category": "ASE" }
     ],
+    "menus": {
+      "view/title": [
+        { "command": "ase.selectModules", "when": "view == ase.androidProject", "group": "navigation@1" },
+        { "command": "ase.reloadProject", "when": "view == ase.androidProject", "group": "navigation@2" },
+        { "command": "ase.refreshTree",   "when": "view == ase.androidProject", "group": "navigation@3" }
+      ],
+      "editor/title": [
+        { "command": "ase.runApp",   "when": "resourceLangId == kotlin", "group": "navigation@1" },
+        { "command": "ase.debugApp", "when": "resourceLangId == kotlin", "group": "navigation@2" }
+      ]
+    },
     "keybindings": [
+      { "command": "ase.selectModules", "key": "ctrl+alt+a", "mac": "cmd+alt+a" },
+      { "command": "ase.reloadProject", "key": "ctrl+shift+o", "mac": "cmd+shift+o", "when": "!editorTextFocus" },
+      { "command": "ase.runApp",        "key": "shift+f10",    "mac": "ctrl+r" },
+      { "command": "ase.debugApp",      "key": "shift+f9",     "mac": "ctrl+d" },
       {
-        "command": "ase.indexProject",
-        "key": "ctrl+alt+g",
-        "mac": "cmd+alt+g"
+        "key": "ctrl+p", "mac": "cmd+p",
+        "command": "-workbench.action.quickOpen",
+        "when": "editorTextFocus && (editorLangId == kotlin || editorLangId == java)"
       },
       {
         "command": "editor.action.triggerParameterHints",
-        "key": "ctrl+p",
-        "mac": "cmd+p",
+        "key": "ctrl+p", "mac": "cmd+p",
         "when": "editorTextFocus && (editorLangId == kotlin || editorLangId == java)"
       },
       {
         "command": "editor.action.revealDefinition",
-        "key": "ctrl+b",
-        "mac": "cmd+b",
+        "key": "ctrl+b", "mac": "cmd+b",
         "when": "editorTextFocus && (editorLangId == kotlin || editorLangId == java)"
       },
       {
         "command": "editor.action.goToImplementation",
-        "key": "ctrl+alt+b",
-        "mac": "cmd+alt+b",
+        "key": "ctrl+alt+b", "mac": "cmd+alt+b",
         "when": "editorTextFocus && (editorLangId == kotlin || editorLangId == java)"
       },
       {
         "command": "editor.action.goToTypeDefinition",
-        "key": "ctrl+shift+b",
-        "mac": "cmd+shift+b",
+        "key": "ctrl+shift+b", "mac": "cmd+shift+b",
         "when": "editorTextFocus && (editorLangId == kotlin || editorLangId == java)"
       },
       {
         "command": "editor.action.referenceSearch.trigger",
-        "key": "alt+f7",
-        "mac": "alt+f7",
+        "key": "alt+f7", "mac": "alt+f7",
         "when": "editorTextFocus && (editorLangId == kotlin || editorLangId == java)"
       },
       {
         "command": "workbench.action.gotoSymbol",
-        "key": "ctrl+f12",
-        "mac": "cmd+f12",
+        "key": "ctrl+f12", "mac": "cmd+f12",
         "when": "editorTextFocus && (editorLangId == kotlin || editorLangId == java)"
       },
       {
         "command": "editor.action.showHover",
-        "key": "ctrl+q",
-        "mac": "ctrl+j",
+        "key": "ctrl+q", "mac": "ctrl+j",
         "when": "editorTextFocus && (editorLangId == kotlin || editorLangId == java)"
       },
       {
         "command": "editor.showTypeHierarchy",
-        "key": "ctrl+h",
-        "mac": "ctrl+h",
+        "key": "ctrl+h", "mac": "ctrl+h",
         "when": "editorTextFocus && (editorLangId == kotlin || editorLangId == java)"
       },
       {
         "command": "editor.showCallHierarchy",
-        "key": "ctrl+alt+h",
-        "mac": "ctrl+alt+h",
+        "key": "ctrl+alt+h", "mac": "ctrl+alt+h",
         "when": "editorTextFocus && (editorLangId == kotlin || editorLangId == java)"
       },
       {
         "command": "editor.action.rename",
-        "key": "shift+f6",
-        "mac": "shift+f6",
+        "key": "shift+f6", "mac": "shift+f6",
+        "when": "editorTextFocus && (editorLangId == kotlin || editorLangId == java)"
+      },
+      {
+        "command": "editor.action.formatDocument",
+        "key": "ctrl+alt+l", "mac": "cmd+alt+l",
+        "when": "editorTextFocus && (editorLangId == kotlin || editorLangId == java)"
+      },
+      {
+        "command": "editor.action.organizeImports",
+        "key": "ctrl+alt+o", "mac": "ctrl+alt+o",
         "when": "editorTextFocus && (editorLangId == kotlin || editorLangId == java)"
       },
       {
         "command": "editor.action.smartSelect.expand",
-        "key": "ctrl+w",
-        "mac": "alt+up",
+        "key": "ctrl+w", "mac": "alt+up",
         "when": "editorTextFocus && (editorLangId == kotlin || editorLangId == java)"
       }
-    ],
-    "menus": {
-      "editor/title": [
-        {
-          "command": "ase.renderComposePreview",
-          "when": "editorLangId == kotlin",
-          "group": "navigation@1"
-        }
-      ]
-    }
+    ]
   },
   "scripts": {
-    "vscode:prepublish": "npm run compile && npm run build:server && npm run bundle:server",
+    "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "build:server": "node scripts/build-server.js",
-    "bundle:server": "node scripts/bundle-server.js",
-    "build:all": "npm run compile && npm run build:server && npm run bundle:server",
-    "test:lsp": "node scripts/test-lsp.js",
-    "test:libraries": "node scripts/test-libraries.js",
-    "test:navigation": "node scripts/verify-navigation.js",
-    "test:integration": "node out/test/runTest.js",
-    "package": "vsce package"
+    "test": "npm run compile && node --test out/test/*.test.js",
+    "package": "npx vsce package"
   },
   "devDependencies": {
-    "@types/glob": "^8.1.0",
-    "@types/mocha": "^10.0.10",
     "@types/node": "^20.11.0",
     "@types/vscode": "^1.85.0",
-    "@vscode/test-electron": "^3.1.0",
     "@vscode/vsce": "^2.30.0",
-    "glob": "^13.0.6",
-    "mocha": "^12.0.1",
     "typescript": "^5.4.0"
-  },
-  "dependencies": {
-    "vscode-languageclient": "^9.0.1"
   }
 }
